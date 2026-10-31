@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 from trader_core import CLOSE, IST, OPEN
 from trader_core import config as cfgmod
+from trader_core.datasource import DataSource
 from trader_core.http import (LIVE, SANDBOX, SandboxUnsupported, UpstoxAPIError, UpstoxAuthError,
                               UpstoxError, default_transport, raise_for_response)
 from trader_core import instruments as instruments_mod
@@ -150,7 +151,7 @@ def resample(bars, minutes=5):
     return out
 
 
-class Client:
+class Client(DataSource):
     """Upstox REST client. Market data always uses the live host (the sandbox
     serves orders only); trading uses the sandbox host in sandbox mode."""
 
