@@ -1,0 +1,18 @@
+{
+  "symbol": "NIFTY",
+  "instrument_key": "NSE_FO|9992600",
+  "date": "2026-10-26",
+  "direction": "long",
+  "entry": 25150.0,
+  "stop": 25100.0,
+  "target": 25250.0,
+  "tick_size": 0.05,
+  "lot_size": 75,
+  "quantity": 75,
+  "risk_inr": 3750.0,
+  "reward_risk": 2.0,
+  "product": "I",
+  "flat_by": "15:10",
+  "source": "trader-exit",
+  "generated_at": "2026-10-26T10:00:00+05:30"
+}

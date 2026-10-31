@@ -1,0 +1,22 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "order_id": "241026000000123",
+      "exchange_order_id": "20261026000000123",
+      "instrument_token": "NSE_EQ|INE002A01018",
+      "trading_symbol": "RELIANCE",
+      "product": "I",
+      "validity": "DAY",
+      "order_type": "LIMIT",
+      "transaction_type": "BUY",
+      "quantity": 25,
+      "disclosed_quantity": 0,
+      "price": 1193.6,
+      "trigger_price": 0.0,
+      "status": "complete",
+      "tag": "dt-entry-orb",
+      "exchange_timestamp": "2026-10-26T10:00:05+05:30"
+    }
+  ]
+}

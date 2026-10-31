@@ -1,0 +1,18 @@
+{
+  "symbol": "RELIANCE",
+  "instrument_key": "NSE_EQ|INE002A01018",
+  "date": "2026-10-26",
+  "direction": "long",
+  "entry": 1193.6,
+  "stop": 1183.65,
+  "target": 1203.55,
+  "tick_size": 0.05,
+  "lot_size": 1,
+  "quantity": 25,
+  "risk_inr": 248.75,
+  "reward_risk": 1.0,
+  "product": "I",
+  "flat_by": "15:10",
+  "source": "trader-exit",
+  "generated_at": "2026-10-26T10:00:00+05:30"
+}
