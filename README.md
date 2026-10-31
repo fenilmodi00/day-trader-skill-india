@@ -1,32 +1,26 @@
-# The Day Trader skill
+# The Day Trader skill, India
 
-11 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
-
-Free, MIT, no signup, no API key. The tools are plain Python that read free
-public data: Yahoo Finance charts, Nasdaq Trader's symbol lists, SEC EDGAR
-and the House Clerk.
-
-One scans thousands of charts for setups. Another tracks breaking news on
-every stock you watch. One watches a setup bar by bar and tells you the moment
-to get in, and another sets your stop and your target before you do. And the
-craziest one is the Time Machine: before you risk a dollar, it replays the
-rest of the session 10,000 times from the stock's own recent bars, plus every
-past day the same setup fired, and tells you the honest odds.
+10 Claude skills for day trading Indian markets: scan the NSE universe, track
+Indian news, time every entry and exit in IST, and replay every outcome in INR
+before you risk a rupee, on Upstox with sandbox trading by default. Free, MIT,
+no signup. Everything is plain Python, standard library only.
 
 And no trade goes through until you say yes. Nothing in this pack can place
-an order on its own. Paper trading is the default.
+an order on its own. Sandbox is the default.
 
-> **Looking for the original Trader skill?** Copy an investor's 13F, the
-> stock screener, tax lots and rebalancing live in
-> [github.com/Jakeschincariol/trader-skill](https://github.com/Jakeschincariol/trader-skill).
-> This repo is its day-trading sequel: the Trader skill v2.
+> **Looking for the original?** This is the India port of Jake Schincariol's
+> day-trading pack,
+> [Jakeschincariol/day-trader-skill](https://github.com/Jakeschincariol/day-trader-skill).
+> The original ships the US-market version: Alpaca paper accounts, SEC EDGAR
+> filings, and the House Clerk's trade disclosures are out of scope here;
+> this repo trades NSE equities in INR on Upstox.
 
 ## Install
 
 Paste this into Claude:
 
 ```
-https://github.com/Jakeschincariol/day-trader-skill
+https://github.com/fenilmodi00/day-trader-skill-india
 
 install skill
 ```
@@ -34,44 +28,42 @@ install skill
 Or as a plugin, in Claude Code:
 
 ```
-/plugin marketplace add Jakeschincariol/day-trader-skill
-/plugin install day-trader-skill@day-trader-skill
+/plugin marketplace add fenilmodi00/day-trader-skill-india
+/plugin install day-trader-skill-india@day-trader-skill-india
 ```
 
 Claude Code namespaces plugin skills, so installed as a plugin they show up as
-`/day-trader-skill:trader-scanner` and so on. Copy the folders instead if you want
-plain `/trader-scanner`:
+`/day-trader-skill-india:trader-scanner` and so on. Copy the folders instead
+if you want plain `/trader-scanner`:
 
 ```bash
-git clone https://github.com/Jakeschincariol/day-trader-skill.git
-cp -r day-trader-skill/trader-* ~/.claude/skills/
+git clone https://github.com/fenilmodi00/day-trader-skill-india.git
+cp -r day-trader-skill-india/trader-* ~/.claude/skills/
 ```
 
 Project-local instead of global: copy the same folders into your repo's
-`.claude/skills/`. No Claude Code at all? Paste any single `SKILL.md` at the
-top of a chat and it runs as a mode. You lose the Python tools, but the method
-works.
+`.claude/skills/`. Keep `trader_core/` alongside them: every skill imports
+it. No Claude Code at all? Paste any single `SKILL.md` at the top of a chat
+and it runs as a mode. You lose the Python tools, but the method works.
 
-The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
-(news filings, the analyst) ask you to identify yourself: put your name and
-email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
-or in the `SEC_USER_AGENT` environment variable.
+The tools need Python 3.8 or newer. Nothing to pip install. All network
+access goes through `trader_core`, so tests and every `--offline` flag run
+without a token.
 
-## The eleven
+## The ten
 
 | command | job | what it does |
 | --- | --- | --- |
-| `/trader-scanner` | Chart Scanner | Scans thousands of charts for setups: opening-range breakouts, flags, oversold bounces. |
-| `/trader-news` | News Monitor | Tracks breaking news on every stock you watch and flags what moves it. |
+| `/trader-scanner` | Chart Scanner | Scans the NSE EQ universe and Nifty 500 for setups: opening-range breakouts, flags, oversold bounces. |
+| `/trader-news` | News Monitor | Tracks Indian news on every stock you watch and flags what moves it. |
 | `/trader-entry` | Entry Timer | Watches a setup bar by bar and tells you the moment to get in. |
-| `/trader-exit` | Exit Planner | Sets your stop and your target before you enter, so you know when to get out. |
-| `/trader-timemachine` | Time Machine | Replays every possible outcome of a trade before you risk a dollar: 10,000 simulated sessions plus every past time the setup fired. |
+| `/trader-exit` | Exit Planner | Sets your stop and your target before you enter, snapped to the tick. |
+| `/trader-timemachine` | Time Machine | Replays every possible outcome of a trade before you risk a rupee: 10,000 simulated sessions from 1-minute bars, plus every past session the setup fired. |
 | `/trader-risk` | Risk Manager | Checks every trade against your limits and stops anything over them. |
-| `/trader-budget` | Budget Manager | Sizes every position to your budget and your max loss per trade. |
-| `/trader-broker` | Order Executor | Sends approved orders to your broker, paper trading by default, never without your yes. |
-| `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
-| `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
-| `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
+| `/trader-budget` | Budget Manager | Sizes every position to your INR budget and your max loss per trade. |
+| `/trader-broker` | Order Executor | Sends approved orders to Upstox, sandbox by default, never without your yes. |
+| `/trader-alerts` | Price Alerts | Rings at the 09:00 pre-open bell, the 09:15 open, a price, a stop, a target and 15:10. |
+| `/trader-analyst` | Results Analyst | Reads an Indian results filing you supply (XBRL) and sums up what changed. |
 
 ## How to use it
 
@@ -80,156 +72,213 @@ what the last one wrote:
 
 ```
 scanner -> news -> entry -> exit -> timemachine -> budget -> risk -> broker   (one trade)
-alerts: stop, target, flat by the close                                       (while it is open)
-news / analyst / pelosi                                                        (on a schedule)
+alerts: 09:00 pre-open, 09:15 open, stop, target, flat by 15:10               (while it is open)
+news / analyst                                                                (on a schedule)
 ```
 
-An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
+An example, one trade on RELIANCE, Monday October 26 2026, the numbers the
+fixtures reproduce:
 
-1. **`/trader-scanner`** at 10:15 AM ET: of the 231 charts in the reel's
-   scan, 42 had closed above their 15-minute opening range. TSLA is one: range 354.47 to 362.18,
-   the 10:10 candle closed at 364.18, 0.55 % over the top.
-2. **`/trader-news`**: the morning's TSLA headlines, in New York time
-   ("Tesla-SpaceX Merger Mania Strikes Wall Street Ahead of Earnings", 8:04,
-   tagged earnings and deal). Tesla reports this week: a day trade is out
-   before the close, so it is not exposed to the report.
-3. **`/trader-entry`** watched TSLA bar by bar. At 10:12 it said waiting (the
-   10:10 bar was still forming). At 10:15 it said triggered: the first
-   5-minute close above the range, 364.18.
+1. **`/trader-scanner`** after 09:35 IST: the opening range 09:15-09:30 on
+   RELIANCE is 1175.30 to 1192.00, and the watchlist flags the symbol.
+2. **`/trader-news`**: the morning's RELIANCE headlines in IST, tagged
+   results, board meeting, or ASM/GSM, so a day trade is out before a
+   scheduled announcement.
+3. **`/trader-entry`** watched RELIANCE bar by bar. At 10:00 IST it said
+   triggered: the first 5-minute close above the range, the 09:55 candle
+   closing at 1193.60.
 4. **`/trader-exit`** set the plan before the entry: stop at the range's
-   midpoint, 358.32, so 5.86 a share at risk; target one times that risk,
-   370.04; flat by 3:55 PM either way.
+   midpoint, 1183.65, so 9.95 a share at risk; target one times that risk,
+   1203.55; flat by 15:10 either way.
 5. **`/trader-timemachine`** replayed the rest of the day 10,000 times, each
-   5-minute candle drawn from TSLA's own candles at that time of day over the
-   previous 59 sessions (seed 19, so anyone can repeat it): target first
-   29.4 %, stop first 25.5 %, still open at the close 45.1 %. It also re-ran
-   the same rule on those 59 real sessions: it fired 33 times, 13 hit the
-   target, 15 the stop, 5 neither. Its verdict: close to a coin flip. That is
-   the point of looking before you risk a dollar.
-6. **`/trader-budget`** with a $5,000 account and a $50 max loss per trade:
-   50 / 5.86 = 8 shares ($2,913.44). If the stop fills at 358.32, the loss is
-   $46.88. It writes one bracket order: buy 8 TSLA, stop-loss 358.32,
-   take-profit 370.04.
+   5-minute candle resampled from the stock's own 1-minute bars (seed 19, so
+   anyone can repeat it), and re-ran the same rule on every past session in
+   its window. It states how many sessions it used, because Upstox gives it
+   only about 15 to 20. That is the point of looking before you risk a rupee.
+6. **`/trader-budget`** with a 50,000 rupee account and a 250 rupee max loss
+   per trade: 250 / 9.95 = 25 shares (29,840 rupees at entry). If the stop
+   fills at 1183.65, the loss is 248.75 before charges. It writes one
+   two-leg MIS order: buy 25 RELIANCE intraday, stop-loss 1183.65,
+   take-profit 1203.55.
 7. **`/trader-risk`** checks it against your limits: the max loss, the daily
-   loss limit, trades per day, reward to risk, the entry window, position
-   size and cash. PASS or BLOCK, with the reason.
-8. **`/trader-broker`** shows you the ticket in plain words. You type yes for
-   that exact order. Claude calls your brokerage connector (Alpaca's MCP
-   server, paper account by default), and Claude's own "Allow once / Deny"
-   card asks you one more time.
-9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
-   flatten whatever is still open.
+   loss limit, trades per day, reward to risk, the entry window, the flat-by
+   time, lot size, tick size and freeze quantity. PASS or BLOCK, with the
+   reason.
+8. **`/trader-broker`** shows you the exact Upstox v3 payload in plain words.
+   You type yes for that exact order. Sandbox is the default; live mode needs
+   the config change and the typed phrase below, and Claude's own
+   "Allow once / Deny" card asks you one more time.
+9. **`/trader-alerts`** rings on the stop, the target, and at 15:10 to
+   flatten whatever is still open, before the broker's 15:25 MIS square-off.
 
 ## The tools
 
-All standard-library Python. The data tools read public endpoints and are
-polite about it.
+All standard-library Python. Market data and orders come from Upstox.
 
 ```bash
-python3 trader-scanner/scan.py universe                                # ~5,900 US stocks, Nasdaq Trader
-python3 trader-scanner/scan.py daily                                   # pre-market setups, whole universe
-python3 trader-scanner/scan.py orb --at 10:15                          # opening-range breakouts so far
-python3 trader-news/news.py --tickers TSLA --hours 12                  # headlines, 8-Ks, today's move
-python3 trader-entry/entry.py check TSLA --setup orb                   # waiting / triggered / expired
-python3 trader-entry/entry.py watch TSLA --every 30                    # bar by bar until it triggers
-python3 trader-exit/exit.py plan --stop or-mid --target 1R --write     # -> trader/plan.json
-python3 trader-timemachine/timemachine.py run --write                  # 10,000 replays + the history
-python3 trader-budget/size.py --write                                  # -> trader/orders.json
-python3 trader-risk/check.py                                           # PASS / BLOCK per order
-python3 trader-broker/ticket.py show                                   # the tickets, READY or not
-python3 trader-alerts/alerts.py add --from-plan                        # stop, target, flat by close
-python3 trader-alerts/alerts.py check                                  # rings what hit, once
-python3 trader-analyst/facts.py TSLA                                   # quarters, growth, EPS
-python3 trader-pelosi/ptr.py index --member pelosi                     # her PTRs this year
+python3 trader-scanner/scan.py orb --at 10:15            # opening-range breakouts so far
+python3 trader-scanner/scan.py daily                     # today's bhavcopy -> the day's watchlist
+python3 trader-news/news.py --tickers RELIANCE --hours 12    # Indian headlines, today's move
+python3 trader-entry/entry.py check RELIANCE --key "NSE_EQ|INE002A01018"   # waiting / triggered / expired
+python3 trader-entry/entry.py watch RELIANCE --every 30  # bar by bar until it triggers
+python3 trader-exit/exit.py plan --from trader/entry.json --write    # -> trader/exit.json
+python3 trader-timemachine/timemachine.py run --write    # 10,000 replays + the history
+python3 trader-budget/size.py --config trader-budget/config.example.json --write   # -> the order plan
+python3 trader-risk/check.py --config trader-budget/config.example.json            # PASS / BLOCK
+python3 trader-broker/ticket.py show                     # the tickets, READY or not
+python3 trader-alerts/alerts.py add --from-plan          # stop, target, flat by 15:10
+python3 trader-alerts/alerts.py check                    # rings what hit, once
+python3 trader-analyst/facts.py RELIANCE --xbrl RELIANCE-results.xml   # quarters, growth, EPS
 ```
 
-```bash
-python3 -m unittest discover -s tests -v
-```
+## Sandbox first, live behind a phrase
 
-## India prototype (free)
+Sandbox is the default everywhere. Orders go to Upstox's sandbox host and
+market data comes from the analytics token; nothing touches real money. Live
+mode requires both of these, and anything missing or misspelled fails closed:
 
-Kite Connect's free Personal plan has no market data, so this prototype proves
-the Indian data path without a key: NSE's public symbol list plus Yahoo's free
-chart endpoint with the `.NS` suffix. Standard-library Python, no broker, no
-orders.
+1. `"mode": "live"` in your ignored `trader/config.json`.
+2. The typed phrase `GO LIVE WITH UPSTOX`, stored once via
+   `trader_core.config.confirm_live` after you enter it.
 
-```bash
-python3 trader-india/india.py universe --write                  # NSE EQUITY_L.csv, the EQ series
-python3 trader-india/india.py bars RELIANCE --interval 5m       # IST bars, 09:15 to 15:30
-python3 trader-india/india.py orb RELIANCE --date 2026-10-26    # opening-range breakout, 09:15 IST
-```
+Even then, only `/trader-broker` can lead to an order, and only after
+`/trader-risk` passes that exact order and you type yes for it in the chat.
 
-Both sources are free and unofficial: NSE can block scraping, Yahoo can lag or
-omit bars. The paid Kite Connect plan (₹500/month per API key) is the
-exchange-grade path for the real port. `tests/test_india.py` runs offline on a
-saved RELIANCE 5-day chart and a trimmed EQUITY_L sample.
+## Token setup
 
-The tests run offline, on fixtures cut from real data: TSLA's 5-minute bars
-for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
-TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
-real XBRL facts. They reproduce every number in the example above.
+Upstox asks for an app's API key and secret, then issues tokens. Set them as
+environment variables, or in an ignored token file under `trader/state/`,
+never in `trader/config.json`, the chat or git:
 
-## Fine print
+| variable | what it is |
+| --- | --- |
+| `UPSTOX_API_KEY` | your app's key from the Upstox developer console |
+| `UPSTOX_API_SECRET` | your app's secret |
+| `UPSTOX_ACCESS_TOKEN` | the daily access token; expires at 03:30 IST, required for orders |
+| `UPSTOX_SANDBOX_TOKEN` | the sandbox token; lasts 30 days |
+| `UPSTOX_ANALYTICS_TOKEN` | the read-only analytics token; lasts one year, serves market data |
 
-**Not financial advice.** This is software that reads public data and does
+The access token is issued per day, so it expires at 03:30 IST: every
+morning before the open, log in again and refresh it. Nothing in this pack
+refreshes tokens automatically.
+
+## Upstox history limits
+
+Historical candle limits on Upstox, which every skill respects:
+
+| interval | history | note |
+| --- | --- | --- |
+| 1 minute | 1 month | the deepest intraday series |
+| 30 minutes | 1 year | |
+| day | 1 year | |
+| week, month | 10 years | |
+| 5 minutes | none | no historical 5-minute series: the tools resample 1-minute bars to 5-minute |
+
+That is why the Time Machine's window shrinks: it replays from 1-minute bars
+resampled to 5-minute, so it sees at most about one month of sessions, 15 to
+20, never fewer than 15, and it says how many it used. The current day has a
+live 5-minute intraday endpoint, which the entry timer uses.
+
+## The IST session
+
+All times IST, NSE trading days only (weekends and NSE holidays are closed):
+
+| time | what happens |
+| --- | --- |
+| 09:00 | pre-open window begins; the alerts pre-open bell rings |
+| 09:15 | the market opens; the opening range starts |
+| 09:30 | the entry window opens |
+| 15:00 | the entry cutoff: no new entries after this |
+| 15:10 | flat-by: everything closed; also the MIS square-off time on CAS days |
+| 15:25 | the broker's MIS square-off: the broker closes what is still open |
+
+The session closes at 15:30. Cut-offs are configurable in `config.json`, but
+the defaults are the ones above, and the point of 15:10 is that you flatten
+yourself before the broker does it for you at 15:25.
+
+## Charges
+
+Every rate is configurable in `config.json`; the defaults below are worked
+example numbers, not a quote. On an intraday round trip, buy 25 RELIANCE at
+1193.60, sell at 1203.55, turnover 59,928.75 rupees:
+
+| head | who takes it | this trade |
+| --- | --- | --- |
+| brokerage | Upstox, per your slab (default: 0.05% capped at 20 rupees an order) | 29.96 |
+| STT | the government, sell side only for intraday | 7.52 |
+| exchange transaction | NSE | 1.78 |
+| SEBI turnover fee | SEBI | 0.06 |
+| stamp duty | the state, buy side only | 0.90 |
+| GST | 18% on brokerage + exchange + SEBI | 5.72 |
+
+46.00 rupees of charges on a 248.75 gross: 202.81 net. At the stop instead of
+the target the same trade is 294.28 out of pocket, charges included. The
+risk manager shows you charges-adjusted numbers before you approve anything.
+
+## India fine print
+
+**Not financial advice.** This is software that reads market data and does
 arithmetic. It does not know your situation and it cannot see the future.
 Most people who day trade lose money. You can lose money. Decide for
 yourself, and talk to a licensed professional if you need advice.
 
-**No trade goes through until you say yes.** Only `/trader-broker` can lead to
-an order, and only after `/trader-risk` passes that exact order and you type
-yes for it in the chat. Set your brokerage tool to "Needs approval" in Claude
-(Customize, Connectors, tool permissions), never "Always allow", so Claude's
-own "Allow once / Deny" card is a second check. No options, margin, short
-selling or leverage unless you turn them on.
+**SEBI algo rules are documented, not automated.** If you automate order
+placement, SEBI's algorithmic-trading framework and your broker's terms can
+require a static IP registered with the broker and, for some setups, algo
+registration or exchange approval. This pack does not set up a static IP,
+does not register anything, and makes no claim of compliance: that is
+between you, your broker and SEBI.
 
-**Paper first.** `"paper": true` is the default in `config.example.json`, and
-Alpaca's MCP server defaults to its paper account. Keys live in environment
-variables, never in the chat.
+**No live surveillance feed.** The scanner and risk manager read the
+config's static lists for blocked symbols, ASM and GSM stages and the F&O
+ban list. They warn, they do not claim live enforcement: there is no
+exchange feed of circuit bands, ban lists or surveillance stages here.
+
+**Sandbox data is not live data.** Upstox's documented sandbox covers order
+APIs; market data comes from the live analytics token. If sandbox data is
+missing for what you asked, the tools fail closed instead of quietly mixing
+in live orders.
 
 **The Time Machine is a simulation, not a prediction.** It is built from the
-stock's own last 60 days of 5-minute bars. The future can do things those 60
-days never did: an earnings report, a halt, a headline. Treat its odds as a
-reality check, never as a promise.
+stock's own last month of 1-minute bars. The future can do things that month
+never did: a results day, a halt, a headline, a circuit band. Treat its odds
+as a reality check, never as a promise.
 
 **A stop is a plan, not a guarantee.** In a fast market or across a gap, a
-stop order can fill well past its price. The max loss shown is the loss at
-the stop price.
+stop order can fill well past its price, and the MIS square-off is a market
+order by nature. The max loss shown is the loss at the stop price.
 
-**The data is free and unofficial.** Yahoo Finance's chart endpoint is not an
-official API: it can lag, change or rate-limit you. The scanner and the entry
-timer read 1-minute or 5-minute bars, not every tick. Check anything that
-matters against your broker before you act on it.
+**Taxes.** Intraday gains are speculative business income in India, and
+frequent trading means frequent charges. Nothing here is tax advice.
 
-**Day-trading rules.** FINRA removed the $25,000 pattern-day-trader minimum
-on June 4, 2026 (Regulatory Notice 26-10), and brokers may phase the change
-in until October 20, 2027, so yours may still apply the old rule. If it does,
-set `"pdt_guard": true` and `/trader-risk` counts your day trades.
+## Tests
 
-**Congress's trades are public, not inside information.** Members must disclose
-trades over $1,000 within 45 days (the STOCK Act). The Pelosi skill reads those
-public filings the minute they post.
+Everything runs offline on recorded fixtures, no token, no network:
 
-**Taxes.** Day-trading gains are short-term gains, and frequent trading makes
-wash sales likely. Nothing here is tax advice.
+```bash
+python -m unittest discover -s tests
+```
+
+The fixtures are cut from real Upstox and NSE data, including the RELIANCE
+session of October 26 2026, and they reproduce every number in the example
+above.
 
 ## Files
 
 ```
-trader-scanner/     SKILL.md, scan.py
+trader-scanner/     SKILL.md, scan.py, nifty500.csv
 trader-news/        SKILL.md, news.py
 trader-entry/       SKILL.md, entry.py
 trader-exit/        SKILL.md, exit.py
 trader-timemachine/ SKILL.md, timemachine.py
 trader-risk/        SKILL.md, check.py
-trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
-trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
+trader-budget/      SKILL.md, size.py, config.example.json
+trader-broker/      SKILL.md, ticket.py, config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
-trader-pelosi/      SKILL.md, ptr.py
-trader-india/       india.py (free NSE data prototype, not a skill yet)
+trader_core/        the shared core: IST time, NSE calendar, config, Upstox client, orders, charges
 tests/              unittest suite + offline fixtures
 ```
 
-MIT. Made by [Jake Schincariol](https://opusjake.ai).
+MIT. Original pack by [Jake Schincariol](https://opusjake.ai), India port by
+the contributors of this repo.
