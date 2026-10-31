@@ -40,7 +40,9 @@ def make_source(path):
 
 
 def evaluate(src, day, hh, mm, **kw):
-    """One evaluate() call pinned to IST."""
+    """One evaluate() call pinned to IST. `day` may be a date or an ISO string."""
+    if not isinstance(day, datetime.date):
+        day = datetime.date.fromisoformat(str(day))
     args = dict(symbol="RELIANCE", instrument_key=KEY, day=day,
                 at=datetime.datetime(2026, 10, 26, hh, mm, tzinfo=IST).replace(year=day.year, month=day.month, day=day.day))
     args.update(kw)
@@ -54,14 +56,16 @@ class Waiting(unittest.TestCase):
         self.src, self.day = make_source(DAY1)
 
     def test_waiting_at_0940_with_two_range_bars(self):
-        res = evaluate(self.src, self.day, 9, 40)
+        # At 09:29 only the 09:15 and 09:20 bars are complete: the 09:25 bar
+        # closes at 09:30. Pinned to the first day of the recorded window.
+        res = evaluate(self.src, self.day, 9, 29)
         self.assertEqual(res["status"], "waiting")
         self.assertEqual(res["phase"], "forming")
         self.assertEqual(res["bars_closed"], 2)              # the 09:15 and 09:20 bars only
         self.assertEqual(res["opening_range"]["bars"], 2)
         self.assertFalse(res["opening_range"]["complete"])
         self.assertEqual(res["opening_range"]["high"], 1192.0)
-        self.assertEqual(res["opening_range"]["low"], 1175.3)
+        self.assertEqual(res["opening_range"]["low"], 1176.8)
 
     def test_pre_open_rows_are_ignored(self):
         res = evaluate(self.src, self.day, 9, 0)
@@ -83,9 +87,9 @@ class Triggered(unittest.TestCase):
         self.assertEqual(res["opening_range"]["mid"], 1183.65)
 
     def test_only_bars_closed_by_the_clock_count(self):
-        res = evaluate(self.src, self.day, 9, 57)            # the 09:55 bar is not done
+        res = evaluate(self.src, self.day, 9, 29)            # the 09:25 bar is not done
         self.assertEqual(res["status"], "waiting")
-        self.assertEqual([b["dt"].strftime("%H:%M") for b in res["_bars"]][-1], "09:50")
+        self.assertEqual([b["dt"].strftime("%H:%M") for b in res["_bars"]][-1], "09:20")
 
     def test_second_close_above_does_not_refire(self):
         res = evaluate(self.src, self.day, 10, 30)
@@ -184,16 +188,23 @@ class Rounding(unittest.TestCase):
         self.assertTrue(orders_mod.on_grid(97.0, 1.0))
 
 
+FULL_SESSION = {"open": "09:15", "entry_start": "09:30", "entry_cutoff": "15:00",
+                "flat_by": "15:10", "close": "15:30", "mis_square_off": "15:25",
+                "mis_square_off_cas": "15:10"}
+
+
 class FlatBy(unittest.TestCase):
     def test_flat_by_defaults_to_15_10_ist(self):
-        t, _ = exitm.resolve_flat_by(datetime.date(2026, 10, 26), None, {"session": {"flat_by": "15:10"}},
+        t, _ = exitm.resolve_flat_by(datetime.date(2026, 10, 26), None,
+                                     {"session": dict(FULL_SESSION, flat_by="15:10")},
                                      datetime.time(10, 0))
         self.assertEqual(t, "15:10")
 
     def test_entry_at_or_after_flat_by_is_refused(self):
         with self.assertRaises(exitm.PlanError):
             exitm.resolve_flat_by(datetime.date(2026, 10, 26), None,
-                                  {"session": {"flat_by": "15:10"}}, datetime.time(15, 10))
+                                  {"session": dict(FULL_SESSION, flat_by="15:10")},
+                                  datetime.time(15, 10))
 
 
 class PlanCLI(unittest.TestCase):
@@ -222,7 +233,7 @@ class PlanCLI(unittest.TestCase):
         return code, (json.load(open(out, encoding="utf-8")) if code == 0 else None), err
 
     def test_plan_from_entry_json_carries_the_pinned_contract(self):
-        code, plan, err = self.plan()
+        code, plan, err = self.plan("--budget", "50000")
         self.assertEqual(code, 0, err)
         self.assertEqual(plan["stop"], 1183.65)
         self.assertEqual(plan["target"], 1203.55)
@@ -242,24 +253,26 @@ class PlanCLI(unittest.TestCase):
             self.assertTrue(orders_mod.on_grid(plan[field], 0.05))
 
     def test_plan_accepted_by_orders_validate_plan(self):
-        code, plan, err = self.plan()
+        code, plan, err = self.plan("--budget", "50000")
         self.assertEqual(code, 0, err)
         rows = instruments_mod.load(open(MASTER, "rb").read())
         inst = instruments_mod.find(rows, "RELIANCE")
         self.assertEqual(orders_mod.validate_plan(plan, inst, {}), [])
 
     def test_plan_without_a_budget_leaves_quantity_out(self):
-        code, plan, err = self.plan("--target", "2R")
+        # --budget 0 opts out of sizing: quantity stays out rather than guessed.
+        code, plan, err = self.plan("--target", "2R", "--budget", "0")
         self.assertEqual(code, 0, err)
         self.assertNotIn("quantity", plan)
         self.assertIsNone(plan.get("risk_inr"))
+        self.assertEqual(plan["legs"], [])
 
     def test_tick_10_master_rounds_the_plan(self):
         doc = master_row(10.0)
         tmp_master = os.path.join(self.tmp, "master10.json")
         with open(tmp_master, "w", encoding="utf-8") as fh:
             json.dump([doc], fh)
-        code, plan, err = self.plan("--master", tmp_master, "--target", "1R")
+        code, plan, err = self.plan("--master", tmp_master, "--target", "1R", "--budget", "50000")
         self.assertEqual(code, 0, err)
         self.assertEqual(plan["tick_size"], 10.0)
         self.assertEqual(plan["stop"], 1180.0)           # 1183.65 rounds down, away from the entry

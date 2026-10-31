@@ -224,7 +224,13 @@ def _instrument(a, sym):
     --master, then the scanner's universe file. The master row carries
     tick_size and lot_size."""
     if getattr(a, "key", None):
-        return a.key, None
+        row = None
+        if getattr(a, "master", None):
+            try:
+                row = instruments_mod.find(instruments_mod.load(read_any(a.master)), sym)
+            except instruments_mod.InstrumentError as e:
+                raise EntryError("%s is not in the instrument master %s: %s" % (sym, a.master, e))
+        return a.key, row
     if getattr(a, "master", None):
         try:
             rows = instruments_mod.load(read_any(a.master))
@@ -590,10 +596,13 @@ def cmd_check(a, source=None):
     at, src = _clock(a, source, cfg)
     day = parse_day(a.date, "--date") if a.date else at.date()
     res = evaluate(src, sym, key, day, at, inst=inst, **rule)
+    doc = entry_doc(res, at) if a.write else None
     if a.write:
-        write_json(a.write, entry_doc(res, at))
+        write_json(a.write, doc)
     if a.json:
-        print(json.dumps(public(res), indent=2))
+        # --json prints the artifact that --write saves when there is one,
+        # the full evaluate() result otherwise.
+        print(json.dumps(doc if doc is not None else public(res), indent=2))
     else:
         for line in describe(res):
             print(line)

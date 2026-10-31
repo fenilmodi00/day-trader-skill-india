@@ -42,10 +42,9 @@ flat_by (default 15:10 IST from config session.flat_by): flat by then, win or
 lose; there is no overnight hold. "min_reward_risk" in the config account
 (default 1.0) only warns here; trader-risk enforces it.
 
-With --budget INR the plan is sized to whole lots the same way trader-budget
-sizes: the smallest of the max loss per trade, the budget position cap and
-the budget itself, floored to lot_size. Without a budget (or without an
-instrument for the lot size) quantity is left out rather than guessed.
+Sized by default from the config's max_loss_per_trade_inr (whole lots, never
+over it); --budget INR caps that lower. Without an instrument for the lot size
+quantity is left out rather than guessed.
 
 A stop is a plan, not a guarantee: a gap or a fast market can fill past it.
 Exit codes: plan 0 = a plan, 1 = refused or an error. show 0 = a plan exists.
@@ -376,24 +375,28 @@ def instrument_for(a, symbol):
 
 
 def size_for(a, inst, risk_per_share, entry):
-    """Whole-lot quantity for --budget: floor(budget / (risk x lot)) x lot,
-    never above the account's max_loss_per_trade_inr when configured. None
-    when there is nothing to size from."""
-    if not getattr(a, "budget", None):
-        return None
-    if not inst or not inst.get("lot_size") or not risk_per_share or risk_per_share <= 0:
-        raise PlanError("--budget sizing needs the instrument's lot_size (pass --master or --lot) "
-                        "and a risk above 0")
-    lot = int(inst["lot_size"])
-    budget = float(a.budget)
-    max_loss = None
+    """Whole-lot quantity: the smallest of the budget (explicit --budget or the
+    config's max_loss_per_trade_inr), floored to whole lots. None when there is
+    nothing to size from. --budget 0 opts out of sizing entirely."""
+    budget, max_loss = getattr(a, "budget", None), None
     try:
         cfg = cfgmod.load(a.config)
         max_loss = cfgmod.limits(cfg).get("max_loss_per_trade_inr")
     except cfgmod.ConfigError:
         max_loss = None
-    cap = budget if not max_loss else min(budget, float(max_loss))
-    qty = int(cap / (risk_per_share * lot)) * lot
+    if budget is None:                # no --budget: size from the account cap
+        budget = max_loss
+    else:
+        budget = float(budget)        # explicit: 0 opts out, no config fallback
+        if max_loss:
+            budget = min(budget, float(max_loss))
+    if not budget:
+        return None
+    if not inst or not inst.get("lot_size") or not risk_per_share or risk_per_share <= 0:
+        raise PlanError("--budget sizing needs the instrument's lot_size (pass --master or --lot) "
+                        "and a risk above 0")
+    lot = int(inst["lot_size"])
+    qty = int(budget / (risk_per_share * lot)) * lot
     return max(qty, 0)
 
 
@@ -426,7 +429,7 @@ def gather(a):
         info = {"symbol": str(doc.get("symbol") or "").upper(), "instrument_key": doc.get("instrument_key") or a.key,
                 "entry": a.entry if a.entry is not None else doc.get("price"),
                 "setup": a.setup or doc.get("setup") or "orb", "date": a.date or doc.get("date"),
-                "entry_time": a.time or doc.get("time"),
+                "entry_time": a.time or doc.get("time") or doc.get("entry_time"),
                 "entry_bar": a.entry_bar if a.entry_bar is not None else doc.get("bar_index"),
                 "interval": doc.get("interval") or "5m",
                 "or_high": a.or_high if a.or_high is not None else orr.get("high"),
@@ -519,13 +522,15 @@ def build_plan(a, now):
     if atr is not None:
         plan["atr"] = round(atr, 4)
         plan["atr_bars"] = atr_n
-    if inst and inst.get("instrument_key") and a.budget:
+    if inst and inst.get("instrument_key") and inst.get("lot_size"):
         qty = size_for(a, inst, c["risk"], c["entry"])
         if qty:
             plan["quantity"] = qty
     legs = legs_for(plan)
     plan["legs"] = legs["legs"]
-    plan["risk_inr"] = round(c["risk"] * plan.get("quantity") or 0, 2) if plan.get("quantity") else None
+    entry_leg = next((one for one in legs["legs"]
+                      if isinstance(one, dict) and one.get("role") == "entry"), None)
+    plan["risk_inr"] = round(c["risk"] * entry_leg["quantity"], 2) if entry_leg else None
     plan["product"] = "I"
     plan["direction"] = "long"
     warnings = []
@@ -551,7 +556,8 @@ def legs_for(plan):
     if not key or not qty:
         return {"legs": []}
     entry_leg = orders_mod.leg(key, "BUY", qty, "LIMIT", product="I", price=plan["entry"], tag="entry")
-    stop_leg = orders_mod.leg(key, "SELL", qty, "SL-M", product="I", trigger_price=plan["stop"], tag="exit-stop")
+    stop_leg = orders_mod.leg(key, "SELL", qty, "SL-M", product="I", trigger_price=plan["stop"],
+                              market_protection=-1, tag="exit-stop")
     target_leg = orders_mod.leg(key, "SELL", qty, "LIMIT", product="I", price=plan["target"], tag="exit-target")
     return orders_mod.plan(entry_leg, stop_leg, target_leg, symbol=plan.get("symbol"))
 
