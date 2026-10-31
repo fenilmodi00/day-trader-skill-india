@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Indian listed-company results XBRL, RELIANCE-style quarter to 2026-06-30,
+     prior-year quarter to 2025-06-30. Namespaces mirror the real filings
+     (ICoS, ICxi business/segment taxonomies, CSTR consolidated); the reader
+     resolves facts by local name, so prefix spellings do not matter. -->
+<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"
+            xmlns:link="http://www.xbrl.org/2003/linkbase"
+            xmlns:xlink="http://www.w3.org/1999/xlink"
+            xmlns:in-ca="http://xbrl.icai.org/in-ca/2024"
+            xmlns:in-capmkt="http://xbrl.icai.org/in-capmkt/2024"
+            xmlns:in-bse-fin="http://xbrl.icai.org/in-bse-fin/2024"
+            xmlns:ICxi="http://xbrl.icai.org/2024/xbrl/ICxi"
+            xmlns:CSTR="http://xbrl.icai.org/2024/xbrl/CSTR">
+  <link:schemaRef xlink:href="reliance-results_2026-06-30.xsd" xlink:type="simple"/>
+  <link:linkbaseRef xlink:href="reliance-results_2026-06-30_pre.xml"
+                    xlink:type="simple" xlink:arcrole="http://www.xbrl.org/2003/arcrole/presentationLinkbaseRef"/>
+  <context id="q26dur">
+    <entity>
+      <identifier scheme="http://www.mca.gov.in">L65190MH1973PLC096835</identifier>
+    </entity>
+    <period>
+      <startDate>2026-04-01</startDate>
+      <endDate>2026-06-30</endDate>
+    </period>
+  </context>
+  <context id="q25dur">
+    <entity>
+      <identifier scheme="http://www.mca.gov.in">L65190MH1973PLC096835</identifier>
+    </entity>
+    <period>
+      <startDate>2025-04-01</startDate>
+      <endDate>2025-06-30</endDate>
+    </period>
+  </context>
+  <context id="fy25dur">
+    <entity>
+      <identifier scheme="http://www.mca.gov.in">L65190MH1973PLC096835</identifier>
+    </entity>
+    <period>
+      <startDate>2025-04-01</startDate>
+      <endDate>2026-03-31</endDate>
+    </period>
+  </context>
+  <context id="c26inst">
+    <entity>
+      <identifier scheme="http://www.mca.gov.in">L65190MH1973PLC096835</identifier>
+    </entity>
+    <instant>2026-06-30</instant>
+  </context>
+  <!-- Segment-tagged revenue, Refining, one of several real dimensions -->
+  <context id="q26seg">
+    <entity>
+      <identifier scheme="http://www.mca.gov.in">L65190MH1973PLC096835</identifier>
+      <segment>
+        <member>
+          <domain>
+            <enum:domain xmlns:enum="http://xbrl.org/2023/extensible-enumerations-2.0">ICxi</enum:domain>
+          </domain>
+          <value>Refining</value>
+        </member>
+      </segment>
+    </entity>
+    <period>
+      <startDate>2026-04-01</startDate>
+      <endDate>2026-06-30</endDate>
+    </period>
+  </context>
+  <!-- Duplicate of q26dur with the identical span, as when a correction is
+       re-tagged: no majority exists, so the reader reports the conflict and
+       breaks the tie on the context id (q26dur sorts first and stands). -->
+  <context id="q26dur-b">
+    <entity>
+      <identifier scheme="http://www.mca.gov.in">L65190MH1973PLC096835</identifier>
+    </entity>
+    <period>
+      <startDate>2026-04-01</startDate>
+      <endDate>2026-06-30</endDate>
+    </period>
+  </context>
+  <unit id="INR">
+    <measure>iso4217:INR</measure>
+  </unit>
+  <unit id="INRshares">
+    <divide>
+      <unitNumerator><measure>iso4217:INR</measure></unitNumerator>
+      <unitDenominator><measure>xbrli:shares</measure></unitDenominator>
+    </divide>
+  </unit>
+  <unit id="shares">
+    <measure>xbrli:shares</measure>
+  </unit>
+  <!-- Current quarter (April to June 2026). Numbers are illustrative, scale
+       chosen to be hand-checkable in the test. -->
+  <in-ca:RevenueFromOperations contextRef="q26dur" unitRef="INR" decimals="-5">2486560000000</in-ca:RevenueFromOperations>
+  <in-capmkt:OtherIncome contextRef="q26dur" unitRef="INR" decimals="-5">55000000000</in-capmkt:OtherIncome>
+  <in-bse-fin:TotalIncome contextRef="q26dur" unitRef="INR" decimals="-5">2541560000000</in-bse-fin:TotalIncome>
+  <ICxi:EmployeeBenefitExpense contextRef="q26dur" unitRef="INR" decimals="-5">220000000000</ICxi:EmployeeBenefitExpense>
+  <in-ca:FinanceCosts contextRef="q26dur" unitRef="INR" decimals="-5">82000000000</in-ca:FinanceCosts>
+  <in-capmkt:DepreciationDepletionAndAmortisationExpense contextRef="q26dur" unitRef="INR" decimals="-5">145000000000</in-capmkt:DepreciationDepletionAndAmortisationExpense>
+  <in-bse-fin:OtherExpenses contextRef="q26dur" unitRef="INR" decimals="-5">1402000000000</in-bse-fin:OtherExpenses>
+  <in-ca:ProfitBeforeTax contextRef="q26dur" unitRef="INR" decimals="-5">692560000000</in-ca:ProfitBeforeTax>
+  <in-capmkt:TaxExpense contextRef="q26dur" unitRef="INR" decimals="-5">175060000000</in-capmkt:TaxExpense>
+  <in-bse-fin:ProfitLossForPeriod contextRef="q26dur" unitRef="INR" decimals="-5">517500000000</in-bse-fin:ProfitLossForPeriod>
+  <ICxi:ProfitLossFromContinuingOperations contextRef="q26dur" unitRef="INR" decimals="-5">517500000000</ICxi:ProfitLossFromContinuingOperations>
+  <in-ca:PaidUpValueOfEquityShareCapital contextRef="c26inst" unitRef="INR" decimals="-5">135000000000</in-ca:PaidUpValueOfEquityShareCapital>
+  <!-- Prior-year quarter (April to June 2025) for YoY. -->
+  <in-ca:RevenueFromOperations contextRef="q25dur" unitRef="INR" decimals="-5">2148690000000</in-ca:RevenueFromOperations>
+  <in-capmkt:OtherIncome contextRef="q25dur" unitRef="INR" decimals="-5">46000000000</in-capmkt:OtherIncome>
+  <in-bse-fin:TotalIncome contextRef="q25dur" unitRef="INR" decimals="-5">2194690000000</in-bse-fin:TotalIncome>
+  <in-ca:FinanceCosts contextRef="q25dur" unitRef="INR" decimals="-5">78000000000</in-ca:FinanceCosts>
+  <in-capmkt:DepreciationDepletionAndAmortisationExpense contextRef="q25dur" unitRef="INR" decimals="-5">132000000000</in-capmkt:DepreciationDepletionAndAmortisationExpense>
+  <in-ca:ProfitBeforeTax contextRef="q25dur" unitRef="INR" decimals="-5">525000000000</in-ca:ProfitBeforeTax>
+  <in-capmkt:TaxExpense contextRef="q25dur" unitRef="INR" decimals="-5">120000000000</in-capmkt:TaxExpense>
+  <in-bse-fin:ProfitLossForPeriod contextRef="q25dur" unitRef="INR" decimals="-5">405000000000</in-bse-fin:ProfitLossForPeriod>
+  <!-- Full-year 2026 fact with no prior year in the file: the QoQ/YoY
+       derivation must say this prior period is missing, not borrow it. -->
+  <in-ca:RevenueFromOperations contextRef="fy25dur" unitRef="INR" decimals="-5">9780000000000</in-ca:RevenueFromOperations>
+  <!-- Segment fact inside a dimensioned context: never competes with the
+       consolidated totals above. -->
+  <in-capmkt:RevenueFromOperations contextRef="q26seg" unitRef="INR" decimals="-5">982000000000</in-capmkt:RevenueFromOperations>
+  <!-- Deliberate conflict: three facts, same name, same undimensioned span,
+       different values, different context ids (a correction re-tagged beside
+       the original). Two facts agree in q26dur, one dissents in q26dur-b:
+       there is a strict majority, so the reader keeps 1402000000000 and still
+       reports the dissent as a conflict. Without the majority it would break
+       the tie on the context id, deterministically. -->
+  <in-ca:OtherExpenses contextRef="q26dur-b" unitRef="INR" decimals="-5">1410000000000</in-ca:OtherExpenses>
+  <in-capmkt:OtherExpenses contextRef="q26dur" unitRef="INR" decimals="-5">1402000000000</in-capmkt:OtherExpenses>
+  <!-- Absent on purpose: BasicEarningsLossPerShare..., NumberOfShares and the
+       paid-up share count are reported missing, never zero-filled. -->
+</xbrli:xbrl>
