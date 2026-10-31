@@ -85,7 +85,7 @@ product and quantities.
 | freeze | the quantity is above the instrument's freeze quantity (NIFTY 1800, from the master) |
 | lot size | the quantity is not a whole multiple of the lot size (equity lot 1, F&O lots from the master) |
 | tick | any leg price or trigger is off the tick grid: 0.05 equity, 1 F&O price bands, 10 where the master says 10 |
-| mis | the plan's product is not the intraday MIS product I (`risk.mis_products`, default NSE_MIS); D and MTF are blocked here |
+| mis | the plan's product is not the intraday MIS product I (`risk.mis_products`, product codes, default `["I"]`; the older `NSE_MIS` spelling still passes); D and MTF are blocked here |
 | funds | the broker seam's available margin is missing or under the entry cost |
 | margins | the broker seam errors, or required margin is far above the entry cost (a warning) |
 | duplicate | a leg tag was already approved or placed today |

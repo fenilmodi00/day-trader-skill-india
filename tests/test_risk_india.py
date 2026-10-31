@@ -8,14 +8,17 @@ import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 from _load import FIX, core, load
 
 core()  # repo root on sys.path before trader_core imports
-from trader_core import charges, config, orders  # noqa: E402
+from trader_core import broker as broker_mod  # noqa: E402
+from trader_core import charges, config, orders, upstox  # noqa: E402
 from trader_core.timeutil import parse_ist  # noqa: E402
 
 risk = load("trader-risk", "check")
+budget_size = load("trader-budget", "size")
 
 DIR = os.path.join(FIX, "trader-risk", "india")
 KEY = "NSE_EQ|INE002A01018"
@@ -156,6 +159,38 @@ class PlanShape(unittest.TestCase):
         self.assertIn("long only", reasons(res))
 
 
+class BudgetOutput(unittest.TestCase):
+    """The check reads trader-budget --json's {"sizing", "plan", "legs"} shape:
+    quantity, symbol and product live under "plan", never at the top."""
+
+    def budget_doc(self, max_loss=250.0):
+        cfg = base_cfg()
+        source = {"symbol": "RELIANCE", "date": MON, "entry": 1193.6, "stop": 1183.65,
+                  "target": 1203.55, "setup": "orb"}
+        sized = budget_size.size_plan(source, cfg, REL, max_loss=max_loss, today=MON)
+        self.assertEqual(sized["quantity"], 25)
+        return cfg, {"sizing": {k: v for k, v in sized.items() if k != "legs"},
+                     "plan": sized, "legs": sized["legs"]}
+
+    def test_sized_budget_output_reaches_a_verdict(self):
+        cfg, doc = self.budget_doc()
+        self.assertNotIn("quantity", doc)
+        res = risk.check(doc, cfg, now=NOW, broker=FundsAnswered(), instrument=REL)
+        self.assertEqual(verdict(res), "PASS", reasons(res))
+        self.assertIn("Rs 248.75", res["checks"]["max_loss"])
+        self.assertIn("quantity 25", res["checks"]["lot_size"])
+
+    def test_plan_with_no_quantity_blocks_instead_of_crashing(self):
+        plan_ = rel_plan()
+        del plan_["quantity"]
+        for leg_ in plan_["legs"]:
+            del leg_["quantity"]
+        res = risk.check(plan_, base_cfg(), now=NOW, broker=FundsAnswered(), instrument=REL)
+        self.assertEqual(verdict(res), "BLOCK")
+        self.assertTrue(any("no measurable max loss" in r for r in res["reasons"]), reasons(res))
+        self.assertIn("no quantity", res["checks"]["lot_size"])
+
+
 class MaxLoss(unittest.TestCase):
     def test_loss_over_cap_blocks(self):
         res = risk.check(rel_plan(), base_cfg(max_loss_per_trade_inr=100.0), now=NOW,
@@ -294,6 +329,30 @@ class MisEligibility(unittest.TestCase):
         res = risk.check(rel_plan(), cfg, now=NOW, broker=FundsAnswered(), instrument=REL)
         self.assertEqual(verdict(res), "PASS", reasons(res))
 
+    def test_product_code_list_passes(self):
+        # the documented default: product codes, I included
+        cfg = base_cfg()
+        cfg["risk"]["mis_products"] = ["I"]
+        res = risk.check(rel_plan(), cfg, now=NOW, broker=FundsAnswered(), instrument=REL)
+        self.assertEqual(verdict(res), "PASS", reasons(res))
+
+    def test_product_missing_from_the_list_blocks(self):
+        cfg = base_cfg()
+        cfg["risk"]["mis_products"] = ["D"]
+        res = risk.check(rel_plan(), cfg, now=NOW, instrument=REL)
+        self.assertEqual(verdict(res), "BLOCK")
+        self.assertIn("not in your risk.mis_products", reasons(res))
+
+    def test_unlisted_product_blocks(self):
+        cfg = base_cfg()
+        cfg["risk"]["mis_products"] = ["I"]
+        plan_ = rel_plan(product="MTF")
+        for leg_ in plan_["legs"]:
+            leg_["product"] = "MTF"
+        res = risk.check(plan_, cfg, now=NOW, instrument=REL)
+        self.assertEqual(verdict(res), "BLOCK")
+        self.assertIn("MTF", reasons(res))
+
     def test_product_d_blocks(self):
         plan_ = rel_plan(product="D")
         for leg_ in plan_["legs"]:
@@ -371,6 +430,21 @@ class ChargesAdjusted(unittest.TestCase):
         res = risk.check(rel_plan(), base_cfg(), now=NOW, instrument=REL)
         self.assertIn("charges", res["checks"]["charges"])
         self.assertIn("net loss", res["checks"]["charges"])
+
+
+class ChargesModel(unittest.TestCase):
+    def test_round_trip_total_is_pinned(self):
+        # entry 1193.60, target 1203.55, qty 25: 45.94 across both sides intraday
+        rt = charges.round_trip(1193.6, 1203.55, 25, cfg=config.DEFAULTS)
+        self.assertEqual(rt["gross_pnl"], 248.75)
+        self.assertEqual(rt["total_charges"], 45.94)
+        self.assertEqual(rt["net_pnl"], 202.81)
+
+    def test_delivery_stt_is_never_read(self):
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["charges"]["stt_delivery_bps"] = 10000.0
+        self.assertEqual(charges.charges("SELL", 1193.6, 25, cfg=cfg)["stt"], 7.46)
+        self.assertEqual(charges.round_trip(1193.6, 1203.55, 25, cfg=cfg)["total_charges"], 45.94)
 
 
 class WatchLists(unittest.TestCase):
@@ -482,6 +556,36 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 0)
         doc = json.loads(out)
         self.assertEqual(doc["verdict"], "PASS", doc["reasons"])
+
+    def test_broker_flag_passes_the_config_through_the_gate(self):
+        # UpstoxBroker without cfg reads mode None and its funds() gate raises:
+        # every --broker funds and margin check would become a reason (a BLOCK)
+        seen = []
+
+        def transport(method, url, payload=None, headers=None, timeout=30):
+            seen.append((method, url))
+            if url.endswith(broker_mod.FUNDS_PATH):
+                return 200, json.dumps({"status": "success",
+                                        "data": {"equity": {"available_margin": 50000.0}}})
+            if url.endswith(broker_mod.MARGINS_PATH):
+                return 200, json.dumps({"status": "success", "data": {"equity": {"instruments": [
+                    {"instrument_key": KEY, "total_margin": 29840.0}]}}})
+            return 404, ""
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(upstox, "default_transport", transport), \
+                mock.patch.dict(os.environ, {"UPSTOX_SANDBOX_TOKEN": "sandbox-token"}):
+            with redirect_stdout(out), redirect_stderr(err):
+                code = risk.main(["--plan", self.plan_path, "--config", self.cfg_path,
+                                  "--broker", "--now", "2026-10-26 10:00", "--json",
+                                  "--no-write"])
+        doc = json.loads(out.getvalue())
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertEqual(doc["verdict"], "PASS", doc["reasons"])
+        self.assertIn("available margin", doc["checks"]["funds"])
+        self.assertIn("required margin", doc["checks"]["margins"])
+        self.assertFalse(any("mode must be one of" in r for r in doc["reasons"]), doc["reasons"])
+        self.assertEqual([method for method, _ in seen], ["GET", "POST"])
 
     def test_block_outside_window(self):
         code, out, _ = self.run_cli(["--plan", self.plan_path, "--now", "2026-10-26 15:01",
