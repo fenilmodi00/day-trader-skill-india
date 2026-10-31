@@ -8,7 +8,7 @@ description: >-
   rounding away from the entry (never widening risk), with a one-tick minimum
   risk. The plan carries the Upstox instrument_key, tick and lot sizes, an
   optional whole-lot quantity sized from --budget, and flat-by 15:10 IST: no
-  overnight hold. Reads trader/entry.json, writes trader/exit.json. All times
+  overnight hold. Reads trader/entry.json, writes trader/plan.json. All times
   IST, all money INR. Use when the user says "set my stop", "what is my
   target", "plan the exit", "where do I get out", or any time an entry is
   about to be taken and the exit must exist first.
@@ -23,7 +23,7 @@ written after a fill is a hope, not a plan.
 
 This is not financial advice. The planner never places an order and never
 will: nothing goes to the broker without you saying yes, out loud, to
-trader-broker. `exit.py` only prints the plan and writes `trader/exit.json`.
+trader-broker. `exit.py` only prints the plan and writes `trader/plan.json`.
 
 Everything runs on the sandbox by default (`mode: "sandbox"` in
 `trader/config.json`). Only the optional ATR stop reads market data (Upstox
@@ -34,7 +34,7 @@ intraday bars); the math itself is offline.
 ## Quick start
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --from trader/entry.json --write trader/exit.json
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --from trader/entry.json --write trader/plan.json
 python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --stop or-mid --target 1R --json
 python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --symbol RELIANCE --key "NSE_EQ|INE002A01018" \
   --entry 1193.60 --or-high 1192.00 --or-low 1175.30 --master tests/fixtures/upstox/instruments-NSE.json.gz
@@ -51,7 +51,7 @@ orb|level`, `--date`, `--time`, `--entry-bar`, `--stop`, `--target 2R`,
 .json.gz: supplies `tick_size` and `lot_size`), `--tick`/`--lot` by hand,
 `--budget INR` (whole-lot sizing), `--offline PATH` (a recorded Upstox 1m
 fixture for the ATR stop), `--now "2026-10-26 10:05"` (IST), `--write
-[PATH]` (default `trader/exit.json`), `--json`, `--config`. Exit codes:
+[PATH]` (default `trader/plan.json`), `--json`, `--config`. Exit codes:
 `plan` 0 = a plan, 1 = refused or an error; `show` 0 = a plan exists.
 
 ## Stops and targets
@@ -80,7 +80,7 @@ rounds on its own grid the same way.
 
 ## The plan
 
-`plan` writes `trader/exit.json`:
+`plan` writes `trader/plan.json`:
 
 ```json
 {"symbol": "RELIANCE", "instrument_key": "NSE_EQ|INE002A01018", "date": "2026-10-26",
@@ -114,13 +114,13 @@ rounds on its own grid the same way.
 | file | what |
 | --- | --- |
 | `trader/entry.json` | the trigger from trader-entry (symbol, instrument_key, price, opening_range, time) |
-| `trader/exit.json` | the plan above; trader-budget sizes it further, trader-risk vets it, trader-timemachine replays it, trader-broker places it after your yes |
+| `trader/plan.json` | the plan above; trader-budget sizes it further, trader-risk vets it, trader-timemachine replays it, trader-broker places it after your yes |
 | `trader/config.json` | optional; `session.flat_by` and `account.max_loss_per_trade_inr` matter here, sandbox is the default when it is absent |
 
 ## Where it sits in the chain
 
 1. `/trader-entry` triggers and writes `trader/entry.json`.
-2. `exit.py plan --from trader/entry.json --write trader/exit.json` sets the
+2. `exit.py plan --from trader/entry.json --write trader/plan.json` sets the
    exit BEFORE the buy.
 3. `/trader-timemachine` replays it, `/trader-budget` sizes it, /trader-risk
    vets it, and only `/trader-broker` after your explicit yes places it.

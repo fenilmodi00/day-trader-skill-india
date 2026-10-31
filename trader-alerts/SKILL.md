@@ -91,12 +91,12 @@ python3 alerts.py plan
   armed again. Add `--json` for machine output: `now`, `fired`, `pending`,
   `missing`, `errors`. Exit code is 0 for a normal quiet check, 2 only for
   real failures (bad args, unreadable config, quote source failure).
-- `plan` prints the plan the alerts follow: `trader/exit.json` when the
+- `plan` prints the plan the alerts follow: `trader/plan.json` when the
   exit skill wrote one, else `alerts.example.json` in this folder.
 
 ## The plan
 
-`add --from-plan` reads `trader/exit.json`, the plan the exit skill
+`add --from-plan` reads `trader/plan.json`, the plan the exit skill
 writes: `symbol`, `instrument_key`, `stop`, `target`, `flat_by` (HH:MM
 IST), plus entry and quantity. From it the skill arms the plan stop, the
 plan target and the flat-by reminder, all dated to the plan's date. With

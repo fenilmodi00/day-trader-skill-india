@@ -5,7 +5,7 @@
     python3 alerts.py add --symbol RELIANCE --stop 1183.65
     python3 alerts.py add --opening-bell
     python3 alerts.py add --flat-by --at 15:10
-    python3 alerts.py add --from-plan             # stop, target, flat-by from trader/exit.json
+    python3 alerts.py add --from-plan             # stop, target, flat-by from trader/plan.json
     python3 alerts.py check                       # ring what hit, once, then write the seen state
     python3 alerts.py check --now "2026-10-26 09:15" --json
     python3 alerts.py plan                        # print the plan the alerts follow
@@ -46,7 +46,8 @@ from trader_core.upstox import Client
 
 SKILL = "trader-alerts"
 RULES_PATH = "trader/alerts.json"
-PLAN_PATH = "trader/exit.json"
+# shared default; trader_core.config owns PLAN_PATH once it ships
+PLAN_PATH = getattr(config, "PLAN_PATH", "trader/plan.json")
 STATE_FILE = "alerts.json"
 PRICE_KINDS = ("above", "below", "stop", "target")
 BELL_TIMES = {"preopen": PRE_OPEN, "open": OPEN, "close": CLOSE}
@@ -133,7 +134,7 @@ def _rule_from_args(args):
 
 
 def _plan_rules(plan, cfg):
-    """Stop, target and flat-by rules from the trader/exit.json plan."""
+    """Stop, target and flat-by rules from the trader/plan.json plan."""
     symbol = plan.get("symbol") or "plan"
     base = {}
     if plan.get("symbol"):
@@ -348,7 +349,7 @@ def _parser():
     a = sub.add_parser("add", help="add a rule")
     a.add_argument("--rules", default=RULES_PATH)
     a.add_argument("--config", default=None, help="config file, for the flat-by default")
-    a.add_argument("--plan", default=PLAN_PATH, help="plan for --from-plan (default trader/exit.json)")
+    a.add_argument("--plan", default=PLAN_PATH, help="plan for --from-plan (default trader/plan.json)")
     g = a.add_mutually_exclusive_group(required=True)
     g.add_argument("--above", type=float, help="ring when the LTP is at or above this")
     g.add_argument("--below", type=float, help="ring when the LTP is at or below this")
