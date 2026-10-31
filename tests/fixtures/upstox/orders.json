@@ -1,0 +1,135 @@
+{
+  "place": {
+    "status": "success",
+    "data": {"order_id": "241026000000123"},
+    "metadata": {"latency": 31}
+  },
+  "place_sliced": {
+    "status": "success",
+    "data": {"order_ids": ["241026000000201", "241026000000202"]},
+    "metadata": {"latency": 44}
+  },
+  "modify": {
+    "status": "success",
+    "data": {"order_id": "241026000000123", "order_status": "open"}
+  },
+  "cancel": {
+    "status": "success",
+    "data": {"order_id": "241026000000123", "order_status": "cancelled"}
+  },
+  "orders": {
+    "status": "success",
+    "data": [
+      {
+        "order_id": "241026000000123",
+        "exchange_order_id": "20261026000000123",
+        "instrument_token": "NSE_EQ|INE002A01018",
+        "trading_symbol": "RELIANCE",
+        "product": "I",
+        "validity": "DAY",
+        "order_type": "SL",
+        "transaction_type": "BUY",
+        "quantity": 25,
+        "disclosed_quantity": 0,
+        "price": 1193.6,
+        "trigger_price": 1194.0,
+        "status": "complete",
+        "tag": "dt-exit-reliance",
+        "exchange_timestamp": "2026-10-26T10:00:05+05:30"
+      },
+      {
+        "order_id": "241026000000124",
+        "exchange_order_id": "20261026000000124",
+        "instrument_token": "NSE_EQ|INE002A01018",
+        "trading_symbol": "RELIANCE",
+        "product": "I",
+        "validity": "DAY",
+        "order_type": "LIMIT",
+        "transaction_type": "SELL",
+        "quantity": 25,
+        "disclosed_quantity": 0,
+        "price": 1203.55,
+        "trigger_price": 0.0,
+        "status": "open",
+        "tag": "dt-exit-reliance",
+        "exchange_timestamp": "2026-10-26T10:00:05+05:30"
+      }
+    ]
+  },
+  "trades": {
+    "status": "success",
+    "data": [
+      {
+        "order_id": "241026000000123",
+        "trade_id": "T241026000000123-1",
+        "trading_symbol": "RELIANCE",
+        "instrument_token": "NSE_EQ|INE002A01018",
+        "product": "I",
+        "transaction_type": "BUY",
+        "quantity": 25,
+        "average_price": 1193.6,
+        "traded_at": "2026-10-26T10:00:05+05:30"
+      }
+    ]
+  },
+  "positions": {
+    "status": "success",
+    "data": [
+      {
+        "instrument_token": "NSE_EQ|INE002A01018",
+        "trading_symbol": "RELIANCE",
+        "product": "I",
+        "quantity": 25,
+        "average_price": 1193.6,
+        "last_price": 1200.0,
+        "pnl": 160.0
+      }
+    ]
+  },
+  "holdings": {
+    "status": "success",
+    "data": [
+      {
+        "instrument_token": "NSE_EQ|INE002A01018",
+        "trading_symbol": "RELIANCE",
+        "isin": "INE002A01018",
+        "quantity": 25,
+        "average_price": 1150.0,
+        "last_price": 1200.0,
+        "pnl": 1250.0
+      }
+    ]
+  },
+  "funds": {
+    "status": "success",
+    "data": {
+      "equity": {
+        "available_margin": 50000.0,
+        "used_margin": 29840.0,
+        "utilised_debits": 29840.0,
+        "exposure_margin": 1492.0,
+        "span_margin": 0.0
+      },
+      "commodity": {
+        "available_margin": 0.0,
+        "used_margin": 0.0
+      }
+    }
+  },
+  "margins": {
+    "status": "success",
+    "data": {
+      "equity": {
+        "total_margin_required": 29840.0,
+        "total_margin_available": 50000.0,
+        "shortfall": 0.0,
+        "instruments": [
+          {
+            "instrument_key": "NSE_EQ|INE002A01018",
+            "total_margin": 29840.0
+          }
+        ]
+      }
+    }
+  }
+}
