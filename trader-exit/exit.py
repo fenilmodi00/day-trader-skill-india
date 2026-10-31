@@ -62,13 +62,15 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from trader_core import IST, OPEN  # noqa: E402
+from trader_core import OPEN  # noqa: E402
 from trader_core import calendar as cal  # noqa: E402
 from trader_core import config as cfgmod  # noqa: E402
+from trader_core.format import money_text  # noqa: E402
 from trader_core import instruments as instruments_mod  # noqa: E402
 from trader_core import orders as orders_mod  # noqa: E402
 from trader_core import upstox as upstox_mod  # noqa: E402
-from trader_core.timeutil import fmt_ist, now_ist, parse_ist  # noqa: E402
+from trader_core.timeutil import (day_or_none, fmt_ist, hhmm_or_none, now_ist, parse_ist,  # noqa: E402
+                                  session_dt)
 
 ATR_BARS = 14
 MIN_RISK_PCT = Decimal("0.05")     # without an instrument, risk under 0.05% of the price is spread noise
@@ -82,29 +84,21 @@ class PlanError(Exception):
 
 # ---------------------------------------------------------------- small helpers
 
-def _ist(day, t):
-    return datetime.datetime.combine(day, t, tzinfo=IST)
-
-
 def parse_day(text, flag="--date"):
-    try:
-        return datetime.date.fromisoformat((text or "").strip())
-    except ValueError:
+    day = day_or_none(text)
+    if day is None:
         raise PlanError("%s wants YYYY-MM-DD, got %r" % (flag, text))
+    return day
 
 
 def parse_hhmm(text, what):
-    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", str(text))
-    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+    t = hhmm_or_none(text)
+    if t is None:
         raise PlanError("%s wants an IST time like 15:10, not %r" % (what, text))
-    return datetime.time(int(m.group(1)), int(m.group(2)))
+    return t
 
 
-def money(x):
-    return "INR %s" % format(Decimal(str(float(x))).quantize(Decimal("0.01")), ",f")
-
-
-def num(x):
+def num_text(x):
     """1, 1.5, 2.25: a Decimal without trailing zeros."""
     return format(Decimal(str(x)).normalize(), "f")
 
@@ -135,7 +129,7 @@ def parse_when(text, what):
     return datetime.time(h, mi)
 
 
-def D(x, what="a number"):
+def as_decimal(x, what="a number"):
     try:
         if isinstance(x, float):
             return Decimal(repr(x))
@@ -174,7 +168,7 @@ def parse_stop(text):
     m = re.match(r"^(price|pct|atr):\s*(?:inr\s+)?([0-9][0-9,]*\.?[0-9]*)$", t)
     if not m:
         raise PlanError("--stop is or-mid, or-low, price:X, pct:X or atr:K (got %r)" % text)
-    kind, val = m.group(1), D(m.group(2), "--stop")
+    kind, val = m.group(1), as_decimal(m.group(2), "--stop")
     if val <= 0:
         raise PlanError("--stop %s needs a number above 0" % kind)
     if kind == "pct" and val >= 100:
@@ -189,19 +183,19 @@ def parse_target(text):
     t = str(text).strip()
     m = re.match(r"^([0-9]*\.?[0-9]+)\s*[Rr]$", t)
     if m:
-        r = D(m.group(1), "--target")
+        r = as_decimal(m.group(1), "--target")
         if r <= 0:
             raise PlanError("--target needs an R multiple above 0, like 1R or 2R")
         return "r", r
     m = re.match(r"^price:\s*(?:inr\s+)?([0-9][0-9,]*\.?[0-9]*)$", t.lower())
     if m:
-        return "price", D(m.group(1), "--target")
+        return "price", as_decimal(m.group(1), "--target")
     raise PlanError("--target is 2R, 1R, 1.5R ... or price:X (got %r)" % text)
 
 
 def r_label(r):
     n = int(r) if r == r.to_integral_value() else None
-    return "%sR (%s times the risk)" % (num(r), WORDS.get(n, num(r)))
+    return "%sR (%s times the risk)" % (num_text(r), WORDS.get(n, num_text(r)))
 
 
 # ---------------------------------------------------------------- the math
@@ -211,7 +205,7 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
     """The stop and target, tick-rounded away from the entry (never wider
     risk), a one-tick minimum risk, and the exact risk numbers. Raises
     PlanError with the reason."""
-    e = D(entry)
+    e = as_decimal(entry)
     if e <= 0:
         raise PlanError("the entry price must be above 0")
     detail = ""
@@ -219,29 +213,33 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
         if or_high is None or or_low is None:
             raise PlanError("an %s stop needs the opening range (--or-high and --or-low)"
                             % stop_rule.replace("_", "-"))
-        oh, ol = D(or_high), D(or_low)
+        oh, ol = as_decimal(or_high), as_decimal(or_low)
         if oh <= ol:
-            raise PlanError("the opening-range high %s must be above its low %s" % (money(oh), money(ol)))
+            raise PlanError("the opening-range high %s must be above its low %s"
+                            % (money_text(oh, prefix="INR", trim=False),
+                               money_text(ol, prefix="INR", trim=False)))
         if stop_rule == "or_mid":
             raw = (oh + ol) / 2
             label = "opening-range midpoint"
-            detail = "(%s + %s) / 2 = %s" % (money(oh), money(ol), num(raw))
+            detail = "(%s + %s) / 2 = %s" % (money_text(oh, prefix="INR", trim=False),
+                                             money_text(ol, prefix="INR", trim=False), num_text(raw))
         else:
             raw, label = ol, "opening-range low"
     elif stop_rule == "price":
         raw, label = stop_param, "your price"
     elif stop_rule == "pct":
         raw = e * (1 - stop_param / 100)
-        label = "%s%% under the entry" % num(stop_param)
-        detail = "%s x (1 - %s%%) = %s" % (money(e), num(stop_param), num(raw))
+        label = "%s%% under the entry" % num_text(stop_param)
+        detail = "%s x (1 - %s%%) = %s" % (money_text(e, prefix="INR", trim=False),
+                                           num_text(stop_param), num_text(raw))
     elif stop_rule == "atr":
         if atr is None:
             raise PlanError("an atr stop needs the session's bars")
-        a = D(round(atr, 6))
+        a = as_decimal(round(atr, 6))
         raw = e - stop_param * a
-        label = "%s x ATR(%d) under the entry" % (num(stop_param), atr_bars)
+        label = "%s x ATR(%d) under the entry" % (num_text(stop_param), atr_bars)
         detail = "ATR %s over the %d bars to the entry%s" % (
-            num(a.quantize(Decimal("0.0001"))), atr_bars,
+            num_text(a.quantize(Decimal("0.0001"))), atr_bars,
             " (fewer than %d so far)" % ATR_BARS if atr_bars < ATR_BARS else "")
     else:
         raise PlanError("unknown stop rule %r" % stop_rule)
@@ -251,26 +249,31 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
         detail += ", rounded down to the tick"
     if stop >= float(e):
         raise PlanError("the stop %s (%s) is at or above the entry %s: a long's stop goes under the entry"
-                        % (money(stop), label, money(e)))
+                        % (money_text(stop, prefix="INR", trim=False), label,
+                           money_text(e, prefix="INR", trim=False)))
     if stop <= 0:
-        raise PlanError("the stop works out to %s: pick a stop above 0" % money(stop))
-    risk = e - D(stop)
+        raise PlanError("the stop works out to %s: pick a stop above 0"
+                        % money_text(stop, prefix="INR", trim=False))
+    risk = e - as_decimal(stop)
     if tick:
         # One tick is the smallest risk the exchange can even price; a round that
         # ate the whole risk is widened back to one tick, never left at zero.
-        if risk < D(tick):
-            if D(tick) >= e:
+        if risk < as_decimal(tick):
+            if as_decimal(tick) >= e:
                 raise PlanError("one tick (%s) is not smaller than the entry %s: no plan fits"
-                                % (money(tick), money(e)))
-            stop = float(D(stop) - D(tick))
-            risk = e - D(stop)
+                                % (money_text(tick, prefix="INR", trim=False),
+                                   money_text(e, prefix="INR", trim=False)))
+            stop = float(as_decimal(stop) - as_decimal(tick))
+            risk = e - as_decimal(stop)
     else:
         floor_risk = e * MIN_RISK_PCT / 100
         if risk < floor_risk:
             raise PlanError("the stop is %s under the entry, less than 0.05%% of the price (%s on %s): "
                             "too tight to survive the spread, normal wiggle would stop you out. Widen it."
-                            % (money(risk), money(floor_risk.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
-                               money(e)))
+                            % (money_text(risk, prefix="INR", trim=False),
+                               money_text(floor_risk.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+                                          prefix="INR", trim=False),
+                               money_text(e, prefix="INR", trim=False)))
     if target_rule == "r":
         target_label = r_label(target_param)
         target = e + target_param * risk
@@ -281,8 +284,9 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
     target_f = orders_mod.round_tick(float(target), tick, "up") if tick else float(target)
     if target_f <= float(e):
         raise PlanError("the target %s is at or below the entry %s: a long's target goes above it"
-                        % (money(target_f), money(e)))
-    rr = ((D(target_f) - e) / risk).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        % (money_text(target_f, prefix="INR", trim=False),
+                           money_text(e, prefix="INR", trim=False)))
+    rr = ((as_decimal(target_f) - e) / risk).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     if target_label is None:
         target_label = "your price (%sR)" % ratio(rr)
     return {"entry": float(e), "stop": stop, "stop_label": label, "stop_detail": detail,
@@ -323,7 +327,7 @@ def session_bars(rows, day, bar_min=5, upto_slot=None, at=None):
     """Closed N-minute bars of one IST session, oldest first: the 1m rows go
     through the one resample in trader_core.upstox. `at` cuts the session at a
     wall-clock time; upto_slot cuts after the entry bar."""
-    open_dt = _ist(day, OPEN)
+    open_dt = session_dt(day, OPEN)
     out = []
     for b in upstox_mod.resample(bars_of(rows), bar_min):
         if b["dt"].date() != day:
@@ -500,8 +504,8 @@ def build_plan(a, now):
     key = info.get("instrument_key") or (inst or {}).get("instrument_key")
     orr = None
     if info["or_high"] is not None and info["or_low"] is not None:
-        orr = {"high": float(D(info["or_high"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
-               "low": float(D(info["or_low"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+        orr = {"high": float(as_decimal(info["or_high"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+               "low": float(as_decimal(info["or_low"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
                "minutes": int(info["or_minutes"] or 15)}
     plan = {"created_by": "trader-exit", "symbol": info["symbol"], "side": "buy", "date": day.isoformat(),
             "setup": info["setup"], "entry": c["entry"], "entry_time": entry_time.strftime("%H:%M") if entry_time else None,
@@ -536,7 +540,7 @@ def build_plan(a, now):
         mrr = (cfgmod.limits(cfg) or {}).get("min_reward_risk")
         if mrr is not None and c["reward_risk"] < float(mrr):
             warnings.append("Reward:risk %s is under your min_reward_risk %s in the config: trader-risk checks that."
-                            % (ratio(c["reward_risk"]), num(D(mrr))))
+                            % (ratio(c["reward_risk"]), num_text(as_decimal(mrr))))
     except cfgmod.ConfigError:
         pass
     if day != now.date():
@@ -563,26 +567,32 @@ def legs_for(plan):
 def describe(plan):
     day = datetime.date.fromisoformat(plan["date"])
     setup = {"orb": "opening-range breakout", "level": "close above a level"}.get(plan["setup"], plan["setup"])
-    e = D(plan["entry"])
-    risk = D(plan["risk_per_share"])
+    e = as_decimal(plan["entry"])
+    risk = as_decimal(plan["risk_per_share"])
     pct = (risk / e * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     when = ""
     if plan.get("entry_time"):
         when = " at %s IST" % plan["entry_time"]
         if plan.get("entry_bar") is not None:
             when += " (bar %d)" % plan["entry_bar"]
+    stop_label = plan.get("stop_label") or plan.get("stop_rule") or "stop"
+    target_label = plan.get("target_label") or plan.get("target_rule") or "target"
     out = ["Exit plan: %s long, %s, %s on Upstox 5m bars (IST, INR)"
            % (plan["symbol"], day.strftime("%a %Y-%m-%d"), setup)]
-    out.append("  Entry         %s%s" % (money(plan["entry"]), when))
-    out.append("  Stop          %s  %s%s" % (money(plan["stop"]), plan["stop_label"],
+    out.append("  Entry         %s%s" % (money_text(plan["entry"], prefix="INR", trim=False), when))
+    out.append("  Stop          %s  %s%s" % (money_text(plan["stop"], prefix="INR", trim=False),
+                                             stop_label,
                                              (": " + plan["stop_detail"]) if plan.get("stop_detail") else ""))
-    out.append("  Target        %s  %s" % (money(plan["target"]), plan["target_label"]))
-    out.append("  Risk a share  %s (%s%% of the entry)" % (money(plan["risk_per_share"]), pct))
+    out.append("  Target        %s  %s" % (money_text(plan["target"], prefix="INR", trim=False),
+                                           target_label))
+    out.append("  Risk a share  %s (%s%% of the entry)" % (
+        money_text(plan["risk_per_share"], prefix="INR", trim=False), pct))
     out.append("  Reward:risk   %s" % ratio(plan["reward_risk"]))
     out.append("  Flat by       %s IST, win or lose: no overnight hold" % plan["flat_by"])
     if plan.get("quantity"):
         out.append("  Size          %s shares (whole lots of %s), risk %s at the stop" % (
-            plan["quantity"], plan.get("lot_size") or 1, money(plan.get("risk_inr") or 0)))
+            plan["quantity"], plan.get("lot_size") or 1,
+            money_text(plan.get("risk_inr") or 0, prefix="INR", trim=False)))
     if plan.get("tick_size") is not None:
         out.append("  Tick          %.2f: the stop rounds down, the target up, away from the entry." % plan["tick_size"])
     out.append("Set before the entry. If price hits the stop, you are out; never move it further away.")

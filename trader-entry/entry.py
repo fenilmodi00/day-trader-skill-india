@@ -63,7 +63,6 @@ import datetime
 import gzip
 import json
 import os
-import re
 import sys
 import time
 
@@ -71,12 +70,13 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from trader_core import CLOSE, IST, OPEN  # noqa: E402
+from trader_core import CLOSE, OPEN  # noqa: E402
 from trader_core import calendar as cal  # noqa: E402
 from trader_core import config as cfgmod  # noqa: E402
 from trader_core import instruments as instruments_mod  # noqa: E402
 from trader_core import upstox as upstox_mod  # noqa: E402
-from trader_core.timeutil import fmt_ist, now_ist, parse_ist  # noqa: E402
+from trader_core.timeutil import (day_or_none, fmt_ist, hhmm_or_none, now_ist, parse_ist,  # noqa: E402
+                                  session_dt)
 
 BAR_MIN = 5
 GRACE = 2                      # seconds after a bar closes before watch asks for it
@@ -96,23 +96,18 @@ class EntryError(Exception):
 
 # ---------------------------------------------------------------- small helpers
 
-def _ist(day, t):
-    """Aware IST datetime for a date and a time."""
-    return datetime.datetime.combine(day, t, tzinfo=IST)
-
-
 def parse_day(text, flag="--date"):
-    try:
-        return datetime.date.fromisoformat((text or "").strip())
-    except ValueError:
+    day = day_or_none(text)
+    if day is None:
         raise EntryError("%s wants YYYY-MM-DD, got %r" % (flag, text))
+    return day
 
 
 def parse_hhmm(text, what):
-    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", str(text))
-    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+    t = hhmm_or_none(text)
+    if t is None:
         raise EntryError("%s wants an IST time like 15:00, not %r" % (what, text))
-    return datetime.time(int(m.group(1)), int(m.group(2)))
+    return t
 
 
 def r2(x):
@@ -268,11 +263,11 @@ def evaluate(source, symbol, instrument_key, day, at, setup="orb", or_minutes=15
         raise EntryError("--min-volume-x must be above 0")
     n_or = or_minutes // BAR_MIN
     inst = inst or {}
-    open_dt, close_dt = _ist(day, OPEN), _ist(day, CLOSE)
+    open_dt, close_dt = session_dt(day, OPEN), session_dt(day, CLOSE)
     entry_start = entry_start or datetime.time(9, 30)
     entry_cutoff = entry_cutoff or datetime.time(15, 0)
-    start_dt = _ist(day, entry_start)
-    cutoff_dt = _ist(day, entry_cutoff)
+    start_dt = session_dt(day, entry_start)
+    cutoff_dt = session_dt(day, entry_cutoff)
     res = {"symbol": symbol, "instrument_key": instrument_key, "setup": setup, "side": "buy",
            "date": day.isoformat(), "interval": "%dm" % BAR_MIN, "or_minutes": or_minutes,
            "now": fmt_ist(at), "status": "waiting", "phase": "", "reason": "",
@@ -498,7 +493,7 @@ def watch_loop(source, clock, sleep, emit, opts, every=30, until=None, max_error
             emit("%s: NSE is closed today (%s). Nothing to watch." % (day.isoformat(),
                                                                       "weekend" if cal.is_weekend(day) else "holiday"))
             return 1, None
-        open_dt, close_dt = _ist(day, OPEN), _ist(day, CLOSE)
+        open_dt, close_dt = session_dt(day, OPEN), session_dt(day, CLOSE)
         if now < open_dt + datetime.timedelta(minutes=BAR_MIN):
             if not said_preopen:
                 emit("%s  %s: watching from the first bar's close at %s." % (
@@ -544,14 +539,14 @@ def watch_loop(source, clock, sleep, emit, opts, every=30, until=None, max_error
         if res["status"] == "expired" or now >= close_dt:
             emit("EXPIRED  %s." % (res["reason"] or "the market closed without a trigger"))
             return 1, res
-        cutoff_dt = _ist(day, parse_hhmm(res["entry_cutoff"], "entry_cutoff"))
-        if until and now >= _ist(day, until):
+        cutoff_dt = session_dt(day, parse_hhmm(res["entry_cutoff"], "entry_cutoff"))
+        if until and now >= session_dt(day, until):
             emit("Stopped at --until %s without a trigger. %s." % (until.strftime("%H:%M"), res["reason"]))
             return 1, res
         cur_slot = int((now - open_dt).total_seconds()) // (BAR_MIN * 60)
         nxt = open_dt + datetime.timedelta(seconds=(cur_slot + 1) * BAR_MIN * 60 + GRACE)
         wait = (nxt - now).total_seconds()
-        for stop_at in (cutoff_dt, close_dt, _ist(day, until) if until else None):
+        for stop_at in (cutoff_dt, close_dt, session_dt(day, until) if until else None):
             if stop_at and stop_at > now:
                 wait = min(wait, (stop_at - now).total_seconds())
         sleep(max(1, min(every, wait)))
@@ -582,7 +577,7 @@ def _clock(a, source, cfg):
         if a.now:
             at = parse_ist(a.now)
         else:
-            at = _ist(datetime.date.fromisoformat(max(days)), REPLAY_AT)
+            at = session_dt(datetime.date.fromisoformat(max(days)), REPLAY_AT)
         return at, OfflineSource(doc, envelope)
     at = parse_ist(a.now) if a.now else now_ist()
     return at, source or upstox_mod.Client(cfg)
@@ -664,7 +659,7 @@ def cmd_watchlist(a, source=None):
         idoc, days, envelope = load_offline(a.offline)
         src = OfflineSource(idoc, envelope)
         day = parse_ist(a.now).date() if a.now else datetime.date.fromisoformat(max(days))
-        at = parse_ist(a.now) if a.now else _ist(day, REPLAY_AT)
+        at = parse_ist(a.now) if a.now else session_dt(day, REPLAY_AT)
     else:
         src = source or upstox_mod.Client(cfg)
         at = parse_ist(a.now) if a.now else now_ist()

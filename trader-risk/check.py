@@ -24,6 +24,7 @@ if _ROOT not in sys.path:
 from trader_core import calendar as cal  # noqa: E402
 from trader_core import charges as charges_mod  # noqa: E402
 from trader_core import config, orders  # noqa: E402
+from trader_core.format import as_float, money_text, price_text  # noqa: E402
 from trader_core.http import SandboxUnsupported  # noqa: E402
 from trader_core.timeutil import now_ist, parse_ist  # noqa: E402
 
@@ -36,26 +37,6 @@ EPS = 1e-9
 
 class RiskError(Exception):
     pass
-
-
-# ---------------------------------------------------------------- helpers
-
-def _f(x):
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return None
-
-
-def money(x):
-    x = float(x)
-    if abs(x - round(x)) < 0.005:
-        return "Rs " + "{:,.0f}".format(round(x))
-    return "Rs " + "{:,.2f}".format(x)
-
-
-def _p(x):
-    return ("%f" % float(x)).rstrip("0").rstrip(".") if float(x) % 1 else "%d" % round(float(x))
 
 
 # ---------------------------------------------------------------- state
@@ -81,12 +62,12 @@ def _plan_legs(plan_):
 def _quantity(plan_):
     """The plan's unit quantity, else the quantity its legs carry; None when
     the plan is unsized, so a missing number is a reason, never a traceback."""
-    qty = _f((plan_ or {}).get("quantity"))
+    qty = as_float((plan_ or {}).get("quantity"))
     if qty is not None:
         return qty
     legs = _plan_legs(plan_)
     for role in ("entry", "target", "stop"):
-        qty = _f((legs.get(role) or {}).get("quantity"))
+        qty = as_float((legs.get(role) or {}).get("quantity"))
         if qty is not None:
             return qty
     return None
@@ -95,20 +76,20 @@ def _quantity(plan_):
 def _entry_price(plan_):
     legs = _plan_legs(plan_)
     entry = legs.get("entry") or {}
-    return _f(entry.get("price"))
+    return as_float(entry.get("price"))
 
 
 def _stop_price(plan_):
     legs = _plan_legs(plan_)
     stop = legs.get("stop") or {}
-    return _f(stop.get("trigger_price")) if stop.get("trigger_price") is not None \
-        else _f(stop.get("price"))
+    return as_float(stop.get("trigger_price")) if stop.get("trigger_price") is not None \
+        else as_float(stop.get("price"))
 
 
 def _target_price(plan_):
     legs = _plan_legs(plan_)
     target = legs.get("target") or {}
-    return _f(target.get("price"))
+    return as_float(target.get("price"))
 
 
 def _trade_day(rec):
@@ -124,7 +105,7 @@ def day_pnl(state, today):
     for rec in (state or {}).get("trades", []):
         if _trade_day(rec) != today:
             continue
-        value = _f(rec.get("pnl"))
+        value = as_float(rec.get("pnl"))
         if value is not None:
             pnl += value
     return round(pnl, 2)
@@ -172,10 +153,10 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
     stop = _stop_price(plan_)
     target = _target_price(plan_)
     qty = _quantity(plan_)
-    qty_s = _p(qty) if qty is not None else "no quantity"
-    lot = _f((instrument or {}).get("lot_size")) or _f((plan_ or {}).get("lot_size")) or 1
-    tick = _f((instrument or {}).get("tick_size")) or _f((plan_ or {}).get("tick_size"))
-    freeze = _f((instrument or {}).get("freeze_quantity"))
+    qty_s = price_text(qty) if qty is not None else "no quantity"
+    lot = as_float((instrument or {}).get("lot_size")) or as_float((plan_ or {}).get("lot_size")) or 1
+    tick = as_float((instrument or {}).get("tick_size")) or as_float((plan_ or {}).get("tick_size"))
+    freeze = as_float((instrument or {}).get("freeze_quantity"))
     key = (plan_ or {}).get("instrument_key") or (instrument or {}).get("instrument_key")
     sym = str((plan_ or {}).get("symbol") or (instrument or {}).get("trading_symbol") or "").upper()
 
@@ -184,25 +165,25 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
     if entry is not None and stop is not None and qty:
         per_unit = max(entry - stop, (tick or 0.05))
         max_loss = round(qty * per_unit, 2)
-    cap = _f(acct.get("max_loss_per_trade_inr"))
+    cap = as_float(acct.get("max_loss_per_trade_inr"))
     if max_loss is not None and cap:
         if max_loss > cap + EPS:
             reasons.append("max loss %s at the stop is over your %s max loss per trade"
-                           % (money(max_loss), money(cap)))
-        checks["max_loss"] = "%s of %s max loss per trade" % (money(max_loss), money(cap))
+                           % (money_text(max_loss), money_text(cap)))
+        checks["max_loss"] = "%s of %s max loss per trade" % (money_text(max_loss), money_text(cap))
     else:
         checks["max_loss"] = "not measurable: the plan has no entry, stop and quantity"
         if max_loss is None:
             reasons.append("the plan has no measurable max loss: entry, stop and quantity are required")
 
     # daily loss from the day's recorded trades
-    daily_cap = _f(acct.get("max_daily_loss_inr"))
+    daily_cap = as_float(acct.get("max_daily_loss_inr"))
     day_loss = day_pnl(state, today)
     if daily_cap:
         if day_loss <= -daily_cap - EPS:
             reasons.append("daily loss limit reached: %s realized today is at or past your %s cap; "
-                           "no new entries today" % (money(-day_loss), money(daily_cap)))
-        checks["daily_loss"] = "%s realized today of %s cap" % (money(-day_loss), money(daily_cap))
+                           "no new entries today" % (money_text(-day_loss), money_text(daily_cap)))
+        checks["daily_loss"] = "%s realized today of %s cap" % (money_text(-day_loss), money_text(daily_cap))
 
     # trades per day
     trades_cap = int(acct.get("max_trades_per_day") or 0)
@@ -224,13 +205,13 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
     checks["orders_today"] = "%d of %s" % (len(orders_today), orders_cap or "unlimited")
 
     # reward:risk
-    min_rr = _f(acct.get("min_reward_risk"))
+    min_rr = as_float(acct.get("min_reward_risk"))
     rr = None
     if entry and stop and target and entry - stop > 0:
         rr = round((target - entry) / (entry - stop), 2)
         if min_rr and rr < min_rr - EPS:
             reasons.append("reward:risk %s (target %s, entry %s, stop %s) is under your minimum %s"
-                           % (rr, _p(target), _p(entry), _p(stop), min_rr))
+                           % (rr, price_text(target), price_text(entry), price_text(stop), min_rr))
         checks["reward_risk"] = "%s (minimum %s)" % (rr, min_rr)
 
     # entry window, IST, configurable; a weekend or NSE holiday has no window at all
@@ -255,12 +236,12 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
     if freeze and qty and qty > freeze:
         reasons.append("quantity %s is above the freeze quantity %s for %s"
                        % (int(qty), int(freeze), sym))
-    checks["freeze"] = ("quantity %s of freeze %s" % (qty_s, _p(freeze))) if freeze else "no freeze data"
+    checks["freeze"] = ("quantity %s of freeze %s" % (qty_s, price_text(freeze))) if freeze else "no freeze data"
 
     # lot size
     if lot and qty and int(qty) % int(lot) != 0:
         reasons.append("quantity %s is not a whole multiple of lot_size %s" % (int(qty), int(lot)))
-    checks["lot_size"] = ("quantity %s on lot %s" % (qty_s, _p(lot))) if lot else "no lot data"
+    checks["lot_size"] = ("quantity %s on lot %s" % (qty_s, price_text(lot))) if lot else "no lot data"
 
     # tick grid
     if tick:
@@ -271,7 +252,7 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
                 continue
             for field in ("price", "trigger_price"):
                 value = leg_.get(field)
-                if value is not None and not orders.on_grid(_f(value), tick):
+                if value is not None and not orders.on_grid(as_float(value), tick):
                     reasons.append("%s %s %s is not on the %s tick grid" % (role, field, value, tick))
     checks["tick"] = "prices on the %s grid" % tick if tick else "no tick data"
 
@@ -307,10 +288,10 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
                                "funds and margin segment on Upstox")
             elif entry and qty and available < entry * qty:
                 reasons.append("available margin %s is under the entry cost %s for %s units"
-                               % (money(available), money(entry * qty), int(qty)))
+                               % (money_text(available), money_text(entry * qty), int(qty)))
             else:
                 funds_ok = True
-            checks["funds"] = "available margin %s" % money(available) if available is not None \
+            checks["funds"] = "available margin %s" % money_text(available) if available is not None \
                 else "no usable funds answer"
         if key:
             margins, note = None, None
@@ -327,8 +308,8 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
                 else:
                     if entry and qty and need > entry * qty + EPS:
                         warns.append("margin required %s exceeds the entry cost %s; check the margin window"
-                                     % (money(need), money(entry * qty)))
-                    note = "required margin %s" % money(need)
+                                     % (money_text(need), money_text(entry * qty)))
+                    note = "required margin %s" % money_text(need)
             checks["margins"] = note or "required margin unavailable"
         else:
             reasons.append("no instrument key on the plan: margin cannot be checked")
@@ -358,9 +339,9 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
             if net_loss > cap + EPS:
                 reasons.append("charges-adjusted loss %s (charges %s) is over your %s max loss per trade; "
                                "the gross loss %s fits, the net does not"
-                               % (money(net_loss), money(rt["total_charges"]), money(cap), money(max_loss)))
+                               % (money_text(net_loss), money_text(rt["total_charges"]), money_text(cap), money_text(max_loss)))
             checks["charges"] = "net loss at the stop %s after %s charges (gross %s)" % (
-                money(net_loss), money(rt["total_charges"]), money(max_loss))
+                money_text(net_loss), money_text(rt["total_charges"]), money_text(max_loss))
 
     # long only
     if (plan_ or {}).get("direction") == "short" and acct.get("long_only", True):
@@ -398,7 +379,7 @@ def _available_margin(funds):
     for seg in ("equity", "SECURITIES"):
         data = funds.get(seg)
         if isinstance(data, dict):
-            value = _f(data.get("available_margin"))
+            value = as_float(data.get("available_margin"))
             if value is not None:
                 return value
     data = funds.get("data")
@@ -430,7 +411,7 @@ def _margin_required(margins, key):
                 if not isinstance(inst, dict) or inst.get("instrument_key") != key:
                     continue
                 for field in ("total_margin", "required_margin"):
-                    value = _f(inst.get(field))
+                    value = as_float(inst.get(field))
                     if value is not None:
                         return value
     return None

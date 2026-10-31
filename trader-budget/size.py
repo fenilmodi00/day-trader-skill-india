@@ -23,6 +23,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from trader_core import config, orders  # noqa: E402
+from trader_core.format import as_float, money_text, price_text  # noqa: E402
 from trader_core.timeutil import now_ist, parse_ist  # noqa: E402
 
 SKILL = "trader-budget"
@@ -34,24 +35,6 @@ class SizeError(Exception):
 
 
 # ---------------------------------------------------------------- helpers
-
-def _f(x):
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return None
-
-
-def money(x):
-    x = float(x)
-    if abs(x - round(x)) < 0.005:
-        return "Rs " + "{:,.0f}".format(round(x))
-    return "Rs " + "{:,.2f}".format(x)
-
-
-def _price(x):
-    return ("%f" % float(x)).rstrip("0").rstrip(".") if float(x) % 1 else "%d" % round(float(x))
-
 
 def read_json(path, what):
     try:
@@ -99,7 +82,7 @@ def size_plan(plan_doc, cfg, instrument, budget=None, max_loss=None, product=Non
         raise SizeError("no instrument row for %s: pass --instruments" % sym)
 
     key = instrument.get("instrument_key")
-    tick = _f(instrument.get("tick_size")) or _f(cfg.get("data", {}).get("tick_default")) or 0.05
+    tick = as_float(instrument.get("tick_size")) or as_float(cfg.get("data", {}).get("tick_default")) or 0.05
     if tick is None or tick <= 0:
         raise SizeError("instrument %s has no usable tick_size" % sym)
     try:
@@ -108,11 +91,11 @@ def size_plan(plan_doc, cfg, instrument, budget=None, max_loss=None, product=Non
         lot = 1
     if lot <= 0:
         lot = 1
-    freeze = _f(instrument.get("freeze_quantity"))
+    freeze = as_float(instrument.get("freeze_quantity"))
 
     acct = config.limits(cfg)
-    budget = _f(budget if budget is not None else acct.get("budget_inr"))
-    max_loss_inr = _f(max_loss if max_loss is not None else acct.get("max_loss_per_trade_inr"))
+    budget = as_float(budget if budget is not None else acct.get("budget_inr"))
+    max_loss_inr = as_float(max_loss if max_loss is not None else acct.get("max_loss_per_trade_inr"))
     if not budget or budget <= 0:
         raise SizeError("no budget: pass --budget or set account.budget_inr in the config")
     if not max_loss_inr or max_loss_inr <= 0:
@@ -120,9 +103,9 @@ def size_plan(plan_doc, cfg, instrument, budget=None, max_loss=None, product=Non
 
     product = product or cfg.get("products", {}).get("default") or "I"
 
-    entry = _f(plan_doc.get("entry"))
-    stop = _f(plan_doc.get("stop"))
-    target = _f(plan_doc.get("target"))
+    entry = as_float(plan_doc.get("entry"))
+    stop = as_float(plan_doc.get("stop"))
+    target = as_float(plan_doc.get("target"))
     for name, value in (("entry", entry), ("stop", stop), ("target", target)):
         if value is None or value <= 0:
             raise SizeError("the plan needs a positive %s (run trader-exit)" % name)
@@ -133,10 +116,10 @@ def size_plan(plan_doc, cfg, instrument, budget=None, max_loss=None, product=Non
     entry = orders.round_tick(entry, tick, "down")
     if stop >= entry:
         raise SizeError("the stop %s is not below the entry %s after tick rounding; "
-                        "a long trade needs its stop underneath" % (_price(stop), _price(entry)))
+                        "a long trade needs its stop underneath" % (price_text(stop), price_text(entry)))
     if target <= entry:
         raise SizeError("the target %s is not above the entry %s after tick rounding; skip this trade"
-                        % (_price(target), _price(entry)))
+                        % (price_text(target), price_text(entry)))
     risk_per_unit = entry - stop
     if risk_per_unit < tick - EPS:
         risk_per_unit = tick  # minimum risk is one tick
@@ -166,11 +149,11 @@ def size_plan(plan_doc, cfg, instrument, budget=None, max_loss=None, product=Non
         if by_budget < 1:
             refusal = ("one lot of %s (%s units) costs %s at the entry, more than your %s budget. "
                        "No order. Raise the budget, or pick a cheaper instrument."
-                       % (sym, lot, money(entry * lot), money(budget)))
+                       % (sym, lot, money_text(entry * lot), money_text(budget)))
         else:
             refusal = ("one lot of %s (%s units) risks %s at the stop, more than your %s max loss "
                        "per trade. No order. Skip this trade, or plan a closer stop with trader-exit."
-                       % (sym, lot, money(per_lot_risk), money(max_loss_inr)))
+                       % (sym, lot, money_text(per_lot_risk), money_text(max_loss_inr)))
 
     plan_out = orders.plan(None, None, None, symbol=sym)
     if qty > 0:
@@ -223,13 +206,13 @@ def report(s):
         lines.append("Education and tooling, not financial advice.")
         return "\n".join(lines)
     lines.append("%s long, entry %s, stop %s, target %s (tick %s)"
-                 % (s["symbol"], _price(s["entry"]), _price(s["stop"]), _price(s["target"]),
-                    _price(s["tick_size"])))
+                 % (s["symbol"], price_text(s["entry"]), price_text(s["stop"]), price_text(s["target"]),
+                    price_text(s["tick_size"])))
     lines.append("Size: %d units of %s = %d lots (lot size %s). Cost %s."
                  % (s["quantity"], s["symbol"], s["quantity"] // max(s["lot_size"], 1),
-                    int(s["lot_size"]), money(s["cost_inr"])))
+                    int(s["lot_size"]), money_text(s["cost_inr"])))
     lines.append("Risk at the stop: %s of your %s max loss. Reward:risk %s. Bound by the %s."
-                 % (money(s["risk_inr"]), money(s["max_loss_per_trade_inr"]), s["reward_risk"],
+                 % (money_text(s["risk_inr"]), money_text(s["max_loss_per_trade_inr"]), s["reward_risk"],
                     s["bound_by"]))
     lines.append("Flat by %s IST, before the MIS square-off. Product %s (intraday)."
                  % (s["flat_by"], s["product"]))

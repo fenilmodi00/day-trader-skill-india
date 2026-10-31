@@ -10,7 +10,7 @@ from _load import core
 
 core()
 
-from trader_core import IST, calendar, config, timeutil  # noqa: E402
+from trader_core import IST, calendar, config, format as core_format, timeutil  # noqa: E402
 
 MON = datetime.datetime(2026, 10, 26, 10, 0, tzinfo=IST)  # a regular Monday
 REPUBLIC_DAY = datetime.date(2026, 1, 26)
@@ -44,6 +44,58 @@ class TimeUtil(unittest.TestCase):
         self.assertEqual(timeutil.fmt_ist(MON, seconds=True), "2026-10-26 10:00:00 IST")
         utc = datetime.datetime(2026, 10, 26, 4, 30, tzinfo=datetime.timezone.utc)
         self.assertEqual(timeutil.fmt_ist(utc), "2026-10-26 10:00 IST")
+
+    def test_session_dt_is_aware_ist(self):
+        dt = timeutil.session_dt(datetime.date(2026, 10, 26), datetime.time(10, 0))
+        self.assertEqual(dt, ist(2026, 10, 26, 10, 0))
+        self.assertEqual(dt.utcoffset(), datetime.timedelta(hours=5, minutes=30))
+
+    def test_day_or_none_accepts_iso_and_rejects_junk(self):
+        self.assertEqual(timeutil.day_or_none("2026-10-26"), datetime.date(2026, 10, 26))
+        self.assertEqual(timeutil.day_or_none(" 2026-10-26 "), datetime.date(2026, 10, 26))
+        self.assertIsNone(timeutil.day_or_none("2026-10-32"))
+        self.assertIsNone(timeutil.day_or_none("26-10-2026"))
+        self.assertIsNone(timeutil.day_or_none(""))
+        self.assertIsNone(timeutil.day_or_none(None))
+
+    def test_hhmm_or_none_boundaries_and_bad_input(self):
+        self.assertEqual(timeutil.hhmm_or_none("00:00"), datetime.time(0, 0))
+        self.assertEqual(timeutil.hhmm_or_none("23:59"), datetime.time(23, 59))
+        self.assertEqual(timeutil.hhmm_or_none(" 9:05 "), datetime.time(9, 5))
+        self.assertIsNone(timeutil.hhmm_or_none("24:00"))
+        self.assertIsNone(timeutil.hhmm_or_none("23:60"))
+        self.assertIsNone(timeutil.hhmm_or_none("10:5"))
+        self.assertIsNone(timeutil.hhmm_or_none("ten"))
+        self.assertIsNone(timeutil.hhmm_or_none(None))
+
+
+class CoreFormat(unittest.TestCase):
+    def test_as_float(self):
+        self.assertEqual(core_format.as_float("12.5"), 12.5)
+        self.assertEqual(core_format.as_float(3), 3.0)
+        self.assertIsNone(core_format.as_float(None))
+        self.assertIsNone(core_format.as_float(""))
+        self.assertIsNone(core_format.as_float("1,234"))
+
+    def test_price_text_drops_trailing_zeros(self):
+        self.assertEqual(core_format.price_text(50), "50")
+        self.assertEqual(core_format.price_text(50.0), "50")
+        self.assertEqual(core_format.price_text(50.5), "50.5")
+        self.assertEqual(core_format.price_text(50.25), "50.25")
+        self.assertEqual(core_format.price_text(0.05), "0.05")
+
+    def test_money_text_trimmed_rupee_form(self):
+        self.assertEqual(core_format.money_text(1234), "Rs 1,234")
+        self.assertEqual(core_format.money_text(1234.0), "Rs 1,234")
+        self.assertEqual(core_format.money_text(1234.5), "Rs 1,234.50")
+        self.assertEqual(core_format.money_text(1234.499), "Rs 1,234.50")
+        self.assertEqual(core_format.money_text(1234.004), "Rs 1,234")
+        self.assertEqual(core_format.money_text(0), "Rs 0")
+
+    def test_money_text_inr_form_keeps_two_decimals(self):
+        self.assertEqual(core_format.money_text(1234, prefix="INR", trim=False), "INR 1,234.00")
+        self.assertEqual(core_format.money_text(1234.5, prefix="INR", trim=False), "INR 1,234.50")
+        self.assertEqual(core_format.money_text(0.05, prefix="INR", trim=False), "INR 0.05")
 
 
 class SessionPhase(unittest.TestCase):
