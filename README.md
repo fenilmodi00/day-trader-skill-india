@@ -5,6 +5,15 @@ Indian news, time every entry and exit in IST, and replay every outcome in INR
 before you risk a rupee, on Upstox with sandbox trading by default. Free, MIT,
 no signup. Everything is plain Python, standard library only.
 
+One skill scans every NSE equity chart each morning from the official
+bhavcopy. Another tracks the morning's Indian headlines and flags what moves
+your stocks. One watches a setup bar by bar and tells you the moment to get
+in, and another sets your stop and your target before you do, snapped to the
+exchange tick. And the craziest one is the Time Machine: before you risk a
+rupee, it replays the rest of the session 10,000 times from the stock's own
+recent bars, plus every past session the same setup fired, and tells you the
+honest odds.
+
 And no trade goes through until you say yes. Nothing in this pack can place
 an order on its own. Sandbox is the default.
 
@@ -38,7 +47,7 @@ if you want plain `/trader-scanner`:
 
 ```bash
 git clone https://github.com/fenilmodi00/day-trader-skill-india.git
-cp -r day-trader-skill-india/trader-* ~/.claude/skills/
+cp -r day-trader-skill-india/trader-* day-trader-skill-india/trader_core ~/.claude/skills/
 ```
 
 Project-local instead of global: copy the same folders into your repo's
@@ -51,6 +60,12 @@ data and orders go through `trader_core`'s HTTP seam. The news RSS feeds and
 the scanner's NSE archive downloads use plain `urllib`, with a URL-free
 User-Agent because NSE stalls requests whose User-Agent carries a URL. Tests
 and every `--offline` flag run without a token.
+
+Not on Claude Code? The gates are in the code, not in the chat: any agent
+harness that can run a shell can drive the same chain. Give it this README
+(or the SKILL.mds) as context, keep the command-approval prompt on before
+`ticket.py execute`, and the method is identical. The raw command list is in
+"The tools" below.
 
 ## The ten
 
@@ -119,18 +134,23 @@ fixtures reproduce:
 All standard-library Python. Market data and orders come from Upstox.
 
 ```bash
-python3 trader-scanner/scan.py orb --at 10:15            # opening-range breakouts so far
-python3 trader-scanner/scan.py daily                     # today's bhavcopy -> the day's watchlist
+python3 trader-scanner/scan.py universe        # NSE EQ list + Nifty 500 -> trader/universe.txt
+python3 trader-scanner/scan.py daily           # today's bhavcopy -> the day's watchlist
+python3 trader-scanner/scan.py orb --at 10:15  # opening-range breakouts so far
 python3 trader-news/news.py --tickers RELIANCE --hours 12    # Indian headlines, today's move
 python3 trader-entry/entry.py check RELIANCE --key "NSE_EQ|INE002A01018"   # waiting / triggered / expired
-python3 trader-entry/entry.py watch RELIANCE --every 30  # bar by bar until it triggers
+python3 trader-entry/entry.py watch RELIANCE --every 30    # bar by bar until it triggers
 python3 trader-exit/exit.py plan --from trader/entry.json --write    # -> trader/plan.json
 python3 trader-timemachine/timemachine.py run --write    # 10,000 replays + the history
 python3 trader-budget/size.py --config trader-budget/config.example.json --instruments instruments.json --write   # -> trader/plan.json, sized
 python3 trader-risk/check.py --config trader-budget/config.example.json            # PASS / BLOCK
-python3 trader-broker/ticket.py show                     # the tickets, READY or not
+python3 trader-broker/ticket.py show           # the tickets, READY or not
+python3 trader-broker/ticket.py approve --yes "yes buy 25 RELIANCE"    # your yes, on record
+python3 trader-broker/ticket.py execute        # send it, sandbox by default
+python3 trader-broker/ticket.py result         # order book, fills, positions
+python3 trader-broker/ticket.py flatten        # opposite market order, same gates
 python3 trader-alerts/alerts.py add --from-plan --plan trader/plan.json   # stop, target, flat by 15:10
-python3 trader-alerts/alerts.py check                    # rings what hit, once
+python3 trader-alerts/alerts.py check          # rings what hit, once
 python3 trader-analyst/facts.py RELIANCE --xbrl RELIANCE-results.xml   # quarters, growth, EPS
 ```
 
@@ -149,23 +169,29 @@ Even then, only `/trader-broker` can lead to an order, and only after
 
 ## Token setup
 
-Upstox asks for an app's API key and secret, then issues tokens. Set them as
-environment variables, or in an ignored token file under `trader/state/`,
+Paper trading needs three things from Upstox, all free: an app's API key and
+secret, the sandbox token for orders, and the analytics token for market
+data. The daily access token is only needed for live orders. Set the tokens
+as environment variables, or in an ignored token file under `trader/state/`,
 never in `trader/config.json`, the chat or git:
 
-| variable | what it is |
-| --- | --- |
-| `UPSTOX_API_KEY` | your app's key from the Upstox developer console |
-| `UPSTOX_API_SECRET` | your app's secret |
-| `UPSTOX_ACCESS_TOKEN` | the daily access token; expires at 03:30 IST, required for orders |
-| `UPSTOX_SANDBOX_TOKEN` | the sandbox token; lasts 30 days |
-| `UPSTOX_ANALYTICS_TOKEN` | the read-only analytics token; lasts one year, serves market data |
+| variable | what it is | paper trading |
+| --- | --- | --- |
+| `UPSTOX_API_KEY` | your app's key from the Upstox developer console | needed, to get the tokens |
+| `UPSTOX_API_SECRET` | your app's secret | needed, to get the tokens |
+| `UPSTOX_SANDBOX_TOKEN` | the sandbox token; lasts 30 days | needed, serves the sandbox order host |
+| `UPSTOX_ANALYTICS_TOKEN` | the read-only analytics token; lasts one year, serves market data | needed, serves quotes and candles |
+| `UPSTOX_ACCESS_TOKEN` | the daily access token; expires at 03:30 IST | not needed until you go live |
 
 The access token is issued per day, so it expires at 03:30 IST: every
 morning before the open, log in again and refresh it. `python -m trader_core.auth login`
 prints the Upstox authorise URL, then `python -m trader_core.auth exchange <code>`
 writes the token to `trader/state/tokens.json`. Nothing in this pack
-refreshes tokens automatically.
+refreshes tokens automatically. The sandbox token and the analytics token
+come from the same Upstox developer console, and neither touches real money:
+the client picks the sandbox host for orders and the live host for market
+data based on `mode`, which stays `"sandbox"` until you deliberately change
+it.
 
 ## Upstox history limits
 
@@ -229,6 +255,18 @@ arithmetic. It does not know your situation and it cannot see the future.
 Most people who day trade lose money. You can lose money. Decide for
 yourself, and talk to a licensed professional if you need advice.
 
+**No trade goes through until you say yes.** Only `/trader-broker` can lead
+to an order, and only after `/trader-risk` passes that exact order and you
+type yes for it in the chat. Keep your host's tool permissions on
+"Needs approval" for the broker commands, never "Always allow", so the
+"Allow once / Deny" card is a second check. No options, no margin beyond
+MIS, no short selling by default.
+
+**Paper first.** `"mode": "sandbox"` is the default, and the Upstox sandbox
+serves the order APIs, so the paper loop is real tickets against a test
+host. Keys and tokens live in environment variables or the ignored
+`trader/state/` folder, never in the chat.
+
 **SEBI algo rules are documented, not automated.** If you automate order
 placement, SEBI's algorithmic-trading framework and your broker's terms can
 require a static IP registered with the broker and, for some setups, algo
@@ -255,6 +293,13 @@ as a reality check, never as a promise.
 stop order can fill well past its price, and the MIS square-off is a market
 order by nature. The max loss shown is the loss at the stop price.
 
+**The data is free and official, the endpoints are not an SLA.** The scanner
+reads NSE's public archives for the universe, bhavcopy and holidays, and the
+news skills read public RSS feeds. They are the sources of record, but they
+can rate-limit or move; the tools fail closed with a clear message instead
+of guessing, and the holiday list and a Nifty 500 seed slice are checked in
+so first runs work offline.
+
 **Taxes.** Intraday gains are speculative business income in India, and
 frequent trading means frequent charges. Nothing here is tax advice.
 
@@ -268,7 +313,8 @@ python -m unittest discover -s tests
 
 The fixtures are cut from real Upstox and NSE data, including the RELIANCE
 session of October 26 2026, and they reproduce every number in the example
-above.
+above. CI runs the same suite on Python 3.8 through 3.13 on Linux and 3.12
+on Windows.
 
 ## Files
 
