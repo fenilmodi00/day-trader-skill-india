@@ -1,0 +1,63 @@
+{
+  "broker": "upstox",
+  "mode": "sandbox",
+  "state_dir": "trader/state",
+  "account": {
+    "budget_inr": 50000.0,
+    "max_loss_per_trade_inr": 250.0,
+    "max_daily_loss_inr": 500.0,
+    "max_trades_per_day": 3,
+    "max_orders_per_day": 12,
+    "min_reward_risk": 1.0,
+    "long_only": true
+  },
+  "session": {
+    "open": "09:15",
+    "entry_start": "09:30",
+    "entry_cutoff": "15:00",
+    "flat_by": "15:10",
+    "close": "15:30",
+    "mis_square_off": "15:25",
+    "mis_square_off_cas": "15:10"
+  },
+  "universe": {
+    "symbols": [
+      "RELIANCE",
+      "HDFCBANK",
+      "ICICIBANK",
+      "INFY",
+      "TCS",
+      "SBIN",
+      "AXISBANK",
+      "ITC"
+    ],
+    "watchlist": [],
+    "nifty500": false,
+    "series": "EQ"
+  },
+  "charges": {
+    "brokerage_bps": 5.0,
+    "brokerage_per_order_inr": 20.0,
+    "stt_intraday_sell_bps": 2.5,
+    "stt_delivery_bps": 10.0,
+    "exchange_bps": 0.297,
+    "sebi_bps": 0.01,
+    "stamp_bps": 0.3,
+    "gst_pct": 18.0
+  },
+  "data": {
+    "tick_default": "1m",
+    "quote_batch": 50,
+    "rate_limit_per_sec": 10,
+    "timeout_s": 30
+  },
+  "products": {
+    "default": "I"
+  },
+  "risk": {
+    "blocked_symbols": [],
+    "asm_symbols": [],
+    "gsm_symbols": [],
+    "ban_symbols": []
+  }
+}
