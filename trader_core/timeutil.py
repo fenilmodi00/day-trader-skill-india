@@ -1,6 +1,7 @@
 """IST clock helpers: one fixed offset (+05:30), it never shifts, no tz database."""
 
 import datetime
+import re
 
 from trader_core import CLOSE, IST, OPEN, PRE_OPEN
 
@@ -27,6 +28,30 @@ def parse_ist(text):
     except ValueError:
         raise ValueError("cannot parse time: %r" % (text,))
     return to_ist(dt)
+
+
+def session_dt(day, t):
+    """Aware IST datetime for a date and a time of day."""
+    return datetime.datetime.combine(day, t, tzinfo=IST)
+
+
+def day_or_none(text):
+    """'YYYY-MM-DD' -> date, or None when it is not a valid date."""
+    try:
+        return datetime.date.fromisoformat(str(text or "").strip())
+    except ValueError:
+        return None
+
+
+def hhmm_or_none(text):
+    """'HH:MM' -> time, or None; hours 0-23 and minutes 0-59 only."""
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", str(text))
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if h > 23 or mi > 59:
+        return None
+    return datetime.time(h, mi)
 
 
 def fmt_ist(dt, seconds=False):

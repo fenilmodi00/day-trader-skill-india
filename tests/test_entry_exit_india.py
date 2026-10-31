@@ -155,19 +155,19 @@ class Rounding(unittest.TestCase):
     """compute() rounds away from the entry; a one-tick minimum risk."""
 
     def test_tick_05_keeps_the_pinned_stop_and_target(self):
-        c = exitm.compute(1193.6, "or_mid", None, "r", exitm.D(1), 1192.0, 1175.3, tick=0.05)
+        c = exitm.compute(1193.6, "or_mid", None, "r", exitm.as_decimal(1), 1192.0, 1175.3, tick=0.05)
         self.assertEqual(c["stop"], 1183.65)
         self.assertEqual(c["target"], 1203.55)
         self.assertEqual(c["risk"], 9.95)
 
     def test_tick_1_rounds_stop_down_and_target_up(self):
-        c = exitm.compute(100.0, "price", exitm.D(97.4), "price", exitm.D(105.4), tick=1.0)
+        c = exitm.compute(100.0, "price", exitm.as_decimal(97.4), "price", exitm.as_decimal(105.4), tick=1.0)
         self.assertEqual(c["stop"], 97.0)
         self.assertEqual(c["target"], 106.0)
         self.assertEqual(c["risk"], 3.0)
 
     def test_tick_10_rounds_away_from_entry(self):
-        c = exitm.compute(100.0, "price", exitm.D(96.5), "price", exitm.D(103.5), tick=10.0)
+        c = exitm.compute(100.0, "price", exitm.as_decimal(96.5), "price", exitm.as_decimal(103.5), tick=10.0)
         self.assertEqual(c["stop"], 90.0)
         self.assertEqual(c["target"], 110.0)
 
@@ -176,11 +176,11 @@ class Rounding(unittest.TestCase):
         # stop up to 101 and eat the whole risk. The stop stays at 100, and a
         # raw stop that rounds to the entry itself is widened back out so the
         # risk is never under one tick.
-        c = exitm.compute(101.2, "price", exitm.D(100.9), "price", exitm.D(102.0), tick=1.0)
+        c = exitm.compute(101.2, "price", exitm.as_decimal(100.9), "price", exitm.as_decimal(102.0), tick=1.0)
         self.assertEqual(c["stop"], 100.0)
         self.assertGreaterEqual(c["risk"], 1.0)
         # nearest would have put the stop ON the entry: refused, then widened.
-        c2 = exitm.compute(101.2, "price", exitm.D(101.1), "price", exitm.D(103.0), tick=1.0)
+        c2 = exitm.compute(101.2, "price", exitm.as_decimal(101.1), "price", exitm.as_decimal(103.0), tick=1.0)
         self.assertEqual(c2["stop"], 100.0)
         self.assertGreaterEqual(c2["risk"], 1.0)
 
@@ -288,6 +288,25 @@ class PlanCLI(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(text)["stop"], 1183.65)
 
+    def test_show_tolerates_a_sized_plan_without_labels(self):
+        # trader-budget --write saves the sized plan; it has no stop_label/target_label.
+        plan = {"symbol": "RELIANCE", "date": "2026-10-26", "entry": 1193.6, "stop": 1183.65,
+                "target": 1203.55, "risk_per_share": 9.95, "reward_risk": 1.0, "flat_by": "15:10",
+                "stop_rule": "or_mid", "target_rule": "r"}
+        out = os.path.join(self.tmp, "trader", "sized.json")
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump(plan, fh)
+        code, text, err = run(exitm, ["show", "--plan", out, "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(json.loads(text)["stop"], 1183.65)
+        code, text, err = run(exitm, ["show", "--plan", out])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("Stop", text)
+        self.assertIn("Target", text)
+        self.assertIn("or_mid", text)
+
 
 class AtrStop(unittest.TestCase):
     """--stop atr:K reads the session's 5m bars through the one resample helper
@@ -386,13 +405,13 @@ class DeadUsSnippets(unittest.TestCase):
         with self.assertRaises(exitm.PlanError):
             exitm.parse_target("price:$1203.55")
         with self.assertRaises(exitm.PlanError):
-            exitm.D("$1193.65")
+            exitm.as_decimal("$1193.65")
 
     def test_plain_inr_prices_still_parse(self):
         self.assertEqual(str(exitm.parse_stop("price:inr 1183.65")[1]), "1183.65")
         self.assertEqual(str(exitm.parse_stop("price:1,183.65")[1]), "1183.65")
         self.assertEqual(str(exitm.parse_target("price:1,203.55")[1]), "1203.55")
-        self.assertEqual(str(exitm.D("INR 1193.60")), "1193.60")
+        self.assertEqual(str(exitm.as_decimal("INR 1193.60")), "1193.60")
 
 
 if __name__ == "__main__":

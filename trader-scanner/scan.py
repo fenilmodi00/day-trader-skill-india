@@ -23,12 +23,13 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from trader_core import CLOSE, IST, OPEN  # noqa: E402
+from trader_core import CLOSE, OPEN  # noqa: E402
 from trader_core import calendar as cal  # noqa: E402
 from trader_core import config as cfgmod  # noqa: E402
 from trader_core import instruments as instruments_mod  # noqa: E402
 from trader_core import upstox as upstox_mod  # noqa: E402
-from trader_core.timeutil import fmt_ist, now_ist, parse_ist  # noqa: E402
+from trader_core.timeutil import (day_or_none, fmt_ist, hhmm_or_none, now_ist, parse_ist,  # noqa: E402
+                                  session_dt)
 
 BAR_MIN = 5
 SESSIONS_NEEDED = 20        # sessions behind the 20-day statistics
@@ -62,11 +63,6 @@ class ScanError(Exception):
 
 # ---------------------------------------------------------------- small helpers
 
-def _ist(day, t):
-    """Aware IST datetime for a date and a time."""
-    return datetime.datetime.combine(day, t, tzinfo=IST)
-
-
 def _number(text):
     """Bhavcopy cell -> float, or None for '', '-', '-' style blanks."""
     if text is None:
@@ -93,18 +89,18 @@ def _bhav_date(text):
 
 def parse_hhmm(text, flag="--at"):
     """'10:15' -> time."""
-    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", text or "")
-    if not m:
+    t = hhmm_or_none(text)
+    if t is None:
         raise ScanError("%s wants HH:MM, got %r" % (flag, text))
-    return datetime.time(int(m.group(1)), int(m.group(2)))
+    return t
 
 
 def parse_day(text, flag="--date"):
     """'YYYY-MM-DD' -> date."""
-    try:
-        return datetime.date.fromisoformat((text or "").strip())
-    except ValueError:
+    day = day_or_none(text)
+    if day is None:
         raise ScanError("%s wants YYYY-MM-DD, got %r" % (flag, text))
+    return day
 
 
 def http_get(url, timeout=30):
@@ -624,7 +620,7 @@ def scan_orb(source, entries, day, cutoff, or_minutes):
     """entries [{symbol, instrument_key}]. Bars are Upstox 1m candles resampled to
     the 5m grid; with a cutoff only bars complete at it count.
     Returns (hit entries, skipped {symbol: why})."""
-    first_close = _ist(day, OPEN) + datetime.timedelta(minutes=or_minutes)
+    first_close = session_dt(day, OPEN) + datetime.timedelta(minutes=or_minutes)
     hits, skipped = [], {}
     for entry in entries:
         sym = entry.get("symbol") or ""
@@ -667,10 +663,10 @@ def orb_window(now, at, or_minutes, day=None):
     if cal.is_weekend(day):
         raise ScanError("NSE is closed on %s (weekend): there is no opening range to break."
                         % day.isoformat())
-    range_end = _ist(day, OPEN) + datetime.timedelta(minutes=or_minutes)
+    range_end = session_dt(day, OPEN) + datetime.timedelta(minutes=or_minutes)
     first_close = range_end + datetime.timedelta(minutes=BAR_MIN)
-    close_dt = _ist(day, CLOSE)
-    cutoff = _ist(day, at) if at else now.replace(second=0, microsecond=0)
+    close_dt = session_dt(day, CLOSE)
+    cutoff = session_dt(day, at) if at else now.replace(second=0, microsecond=0)
     if at and cutoff > now + datetime.timedelta(minutes=1):
         raise ScanError("--at %s is later than now (%s)." % (at.strftime("%H:%M"), fmt_ist(now)))
     if cutoff >= close_dt:
@@ -945,7 +941,7 @@ def cmd_orb(a, source=None):
             raise ScanError("the offline file is one instrument's candles: pass one --symbols symbol")
         src = OfflineSource(doc)
         day = now.date() if a.now else datetime.date.fromisoformat(max(days))
-        cutoff = _ist(day, at) if at else (now.replace(second=0, microsecond=0) if a.now else None)
+        cutoff = session_dt(day, at) if at else (now.replace(second=0, microsecond=0) if a.now else None)
         doc_source = "offline-fixture"
     else:
         cfg = cfgmod.load(a.config)
@@ -974,7 +970,7 @@ def cmd_orb(a, source=None):
     elif cutoff is None:
         # a full-session replay with no close above the range: the day is done
         status = "expired"
-    elif cutoff < _ist(day, CLOSE):
+    elif cutoff < session_dt(day, CLOSE):
         # in-session with no trigger yet: the session can still produce one
         status = "waiting"
     else:
@@ -994,7 +990,7 @@ def cmd_orb(a, source=None):
         print("Opening-range breakout scan for %s (NSE, Upstox 1m resampled to 5m): "
               "%d-minute range 09:15 to %s, cutoff %s."
               % (day.isoformat(), a.or_minutes,
-                 (_ist(day, OPEN) + datetime.timedelta(minutes=a.or_minutes)).strftime("%H:%M"),
+                 (session_dt(day, OPEN) + datetime.timedelta(minutes=a.or_minutes)).strftime("%H:%M"),
                  fmt_ist(cutoff) if cutoff else "full session"))
         print("Universe %s, scanned %s, skipped %s."
               % ("{:,}".format(len(entries)), "{:,}".format(len(entries) - len(skipped)),
