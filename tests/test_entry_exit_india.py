@@ -145,9 +145,10 @@ class EntryCLI(unittest.TestCase):
 
 
 def master_row(tick, lot=1):
+    # tick is INR; raw Upstox masters carry paise, so multiply on the way out.
     return {"instrument_key": KEY, "exchange_token": "2885", "trading_symbol": "RELIANCE",
             "isin": "INE002A01018", "instrument_type": "EQ", "lot_size": float(lot),
-            "tick_size": float(tick), "freeze_quantity": 11111.0}
+            "tick_size": float(tick) * 100.0, "freeze_quantity": 11111.0}
 
 
 class Rounding(unittest.TestCase):
