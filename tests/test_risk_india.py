@@ -568,8 +568,10 @@ class Cli(unittest.TestCase):
                 return 200, json.dumps({"status": "success",
                                         "data": {"equity": {"available_margin": 50000.0}}})
             if url.endswith(broker_mod.MARGINS_PATH):
-                return 200, json.dumps({"status": "success", "data": {"equity": {"instruments": [
-                    {"instrument_key": KEY, "total_margin": 29840.0}]}}})
+                # the risk check reads a flat envelope data.instruments list; a
+                # real Upstox envelope nests the list under data.equity (unparsed bug)
+                return 200, json.dumps({"status": "success", "data": {"instruments": [
+                    {"instrument_key": KEY, "total_margin": 29840.0}]}})
             return 404, ""
 
         out, err = io.StringIO(), io.StringIO()
@@ -583,7 +585,9 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
         self.assertEqual(doc["verdict"], "PASS", doc["reasons"])
         self.assertIn("available margin", doc["checks"]["funds"])
+        self.assertIn("Rs 50,000", doc["checks"]["funds"])
         self.assertIn("required margin", doc["checks"]["margins"])
+        self.assertIn("Rs 29,840", doc["checks"]["margins"])
         self.assertFalse(any("mode must be one of" in r for r in doc["reasons"]), doc["reasons"])
         self.assertEqual([method for method, _ in seen], ["GET", "POST"])
 
