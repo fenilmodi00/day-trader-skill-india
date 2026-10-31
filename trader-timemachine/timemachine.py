@@ -430,7 +430,7 @@ def _num(v, what):
 
 
 def load_plan(a, now_ist):
-    """The plan from --plan (trader/exit.json) or from the flags, checked and normalized."""
+    """The plan from --plan (trader/plan.json) or from the flags, checked and normalized."""
     if a.symbol:
         missing = [f for f in ("entry", "stop", "target", "entry_time") if getattr(a, f) is None]
         if missing:

@@ -60,6 +60,15 @@ def _p(x):
 
 # ---------------------------------------------------------------- state
 
+def _plan_doc(plan_):
+    """The sized plan itself. trader-budget --json prints
+    {"sizing", "plan", "legs"}, so a wrapper is unwrapped; anything that is
+    not a dict becomes an empty plan and the checks report its gaps."""
+    if isinstance(plan_, dict) and isinstance(plan_.get("plan"), dict):
+        return plan_["plan"]
+    return plan_ if isinstance(plan_, dict) else {}
+
+
 def _plan_legs(plan_):
     legs = (plan_ or {}).get("legs") or []
     by_role = {}
@@ -67,6 +76,20 @@ def _plan_legs(plan_):
         if isinstance(one, dict) and one.get("role"):
             by_role.setdefault(one["role"], one)
     return by_role
+
+
+def _quantity(plan_):
+    """The plan's unit quantity, else the quantity its legs carry; None when
+    the plan is unsized, so a missing number is a reason, never a traceback."""
+    qty = _f((plan_ or {}).get("quantity"))
+    if qty is not None:
+        return qty
+    legs = _plan_legs(plan_)
+    for role in ("entry", "target", "stop"):
+        qty = _f((legs.get(role) or {}).get("quantity"))
+        if qty is not None:
+            return qty
+    return None
 
 
 def _entry_price(plan_):
@@ -139,7 +162,7 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
     today = now.date().isoformat()
     acct = config.limits(cfg)
     state = record if record is not None else config.state_read(cfg, ORDERS_STATE, {})
-    plan_ = plan_ if isinstance(plan_, dict) else {}
+    plan_ = _plan_doc(plan_)
 
     # the plan as a set: trader_core.orders.validate_plan
     reasons.extend(orders.validate_plan(plan_, instrument or {}, cfg))
@@ -148,7 +171,8 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
     entry = _entry_price(plan_)
     stop = _stop_price(plan_)
     target = _target_price(plan_)
-    qty = _f((plan_ or {}).get("quantity"))
+    qty = _quantity(plan_)
+    qty_s = _p(qty) if qty is not None else "no quantity"
     lot = _f((instrument or {}).get("lot_size")) or _f((plan_ or {}).get("lot_size")) or 1
     tick = _f((instrument or {}).get("tick_size")) or _f((plan_ or {}).get("tick_size"))
     freeze = _f((instrument or {}).get("freeze_quantity"))
@@ -231,12 +255,12 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
     if freeze and qty and qty > freeze:
         reasons.append("quantity %s is above the freeze quantity %s for %s"
                        % (int(qty), int(freeze), sym))
-    checks["freeze"] = ("quantity %s of freeze %s" % (int(qty), int(freeze))) if freeze else "no freeze data"
+    checks["freeze"] = ("quantity %s of freeze %s" % (qty_s, _p(freeze))) if freeze else "no freeze data"
 
     # lot size
     if lot and qty and int(qty) % int(lot) != 0:
         reasons.append("quantity %s is not a whole multiple of lot_size %s" % (int(qty), int(lot)))
-    checks["lot_size"] = ("quantity %s on lot %s" % (int(qty), int(lot))) if lot else "no lot data"
+    checks["lot_size"] = ("quantity %s on lot %s" % (qty_s, _p(lot))) if lot else "no lot data"
 
     # tick grid
     if tick:
@@ -251,11 +275,14 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
                     reasons.append("%s %s %s is not on the %s tick grid" % (role, field, value, tick))
     checks["tick"] = "prices on the %s grid" % tick if tick else "no tick data"
 
-    # MIS eligibility: product I plus risk.mis_products
+    # MIS eligibility: product I plus risk.mis_products (product codes, with
+    # the exchange string NSE_MIS kept as the older spelling of I)
     product = (plan_ or {}).get("product")
     mis_products = [str(p) for p in (cfg.get("risk") or {}).get("mis_products") or []]
+    mis_ok = (not mis_products or product in mis_products
+              or (product == "I" and "NSE_MIS" in mis_products))
     if product == "I":
-        if mis_products and "NSE_MIS" not in mis_products:
+        if not mis_ok:
             reasons.append("product I is not in your risk.mis_products list %s; not MIS eligible"
                            % mis_products)
         checks["mis"] = "product I (MIS intraday)"
@@ -323,7 +350,7 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
     # charges-adjusted loss: the stop must still be inside the cap net of charges
     if max_loss is not None and qty and entry is not None and stop is not None:
         try:
-            rt = charges_mod.round_trip(entry, stop, int(qty), product=product or "I", cfg=cfg)
+            rt = charges_mod.round_trip(entry, stop, int(qty), cfg=cfg)
         except orders.PlanError as exc:
             reasons.append("charges check failed: %s" % exc)
         else:
@@ -381,18 +408,31 @@ def _available_margin(funds):
 
 
 def _margin_required(margins, key):
-    """total margin required for key, across known Upstox margin shapes."""
+    """total margin required for key, across known Upstox margin shapes.
+
+    UpstoxBroker returns the documented envelope, so the instrument list sits
+    under data.equity.instruments (or data.commodity.instruments); the offline
+    seams may hand over the body, or a segment, already unwrapped."""
     if not isinstance(margins, dict):
         return None
-    for cont in ("equity", "commodity"):
-        data = margins.get(cont)
-        if isinstance(data, dict):
-            for inst in data.get("instruments") or []:
-                if isinstance(inst, dict) and inst.get("instrument_key") == key:
-                    return _f(inst.get("total_margin"))
-    for inst in (margins.get("data") or {}).get("instruments") or []:
-        if isinstance(inst, dict) and inst.get("instrument_key") == key:
-            return _f(inst.get("total_margin"))
+    docs = [margins]
+    body = margins.get("data")
+    if isinstance(body, dict):
+        docs.insert(0, body)
+    for doc in docs:
+        lists = [doc.get("instruments")]
+        for cont in ("equity", "commodity"):
+            seg = doc.get(cont)
+            if isinstance(seg, dict):
+                lists.append(seg.get("instruments"))
+        for instruments in lists:
+            for inst in instruments or []:
+                if not isinstance(inst, dict) or inst.get("instrument_key") != key:
+                    continue
+                for field in ("total_margin", "required_margin"):
+                    value = _f(inst.get(field))
+                    if value is not None:
+                        return value
     return None
 
 
@@ -466,6 +506,7 @@ def main(argv=None, source=None):
         print("%s: cannot read the plan %s: %s (run trader-budget first)" % (SKILL, args.plan, exc),
               file=sys.stderr)
         return 2
+    plan_ = _plan_doc(plan_)
     try:
         cfg = config.load(args.config)
     except config.ConfigError as exc:
@@ -502,7 +543,7 @@ def main(argv=None, source=None):
     if broker is None and getattr(args, "broker", False):
         from trader_core.broker import UpstoxBroker
         from trader_core.upstox import Client
-        broker = UpstoxBroker(Client(cfg))
+        broker = UpstoxBroker(Client(cfg), cfg=cfg)
     res = check(plan_, cfg, now=now, broker=broker, instrument=instrument)
     doc = dict(res)
     doc["generated_at"] = now_ist().replace(microsecond=0).isoformat()
