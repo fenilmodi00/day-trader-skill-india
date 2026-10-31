@@ -388,6 +388,49 @@ class WatchLists(unittest.TestCase):
         self.assertEqual(verdict(res), "PASS", reasons(res))
         self.assertIn("ban", " ".join(res["warnings"]))
 
+    def test_blocked_symbol_blocks_naming_the_list(self):
+        cfg = base_cfg()
+        cfg["risk"]["blocked_symbols"] = ["RELIANCE"]
+        res = risk.check(rel_plan(), cfg, now=NOW, broker=FundsAnswered(), instrument=REL)
+        self.assertEqual(verdict(res), "BLOCK")
+        self.assertTrue(any("blocked_symbols" in r and "RELIANCE" in r for r in res["reasons"]),
+                        reasons(res))
+
+
+class Closure(unittest.TestCase):
+    """A weekend or NSE holiday blocks even inside the clock window."""
+
+    def test_saturday_blocks_with_the_closure_date(self):
+        res = risk.check(rel_plan(), base_cfg(), now=parse_ist("2026-10-31 10:00"),
+                         broker=FundsAnswered(), instrument=REL)
+        self.assertEqual(verdict(res), "BLOCK")
+        self.assertTrue(any("2026-10-31" in r and "weekend" in r for r in res["reasons"]),
+                        reasons(res))
+
+    def test_nse_holiday_blocks_with_the_name_and_date(self):
+        # Dussehra, from trader_core/data/nse_holidays.json
+        res = risk.check(rel_plan(), base_cfg(), now=parse_ist("2026-10-20 10:00"),
+                         broker=FundsAnswered(), instrument=REL)
+        self.assertEqual(verdict(res), "BLOCK")
+        self.assertTrue(any("2026-10-20" in r and "Dussehra" in r for r in res["reasons"]),
+                        reasons(res))
+
+
+class OrdersPerDay(unittest.TestCase):
+    def test_order_cap_reached_blocks(self):
+        cfg = base_cfg()
+        cfg["account"]["max_orders_per_day"] = 2
+        record = {"orders": [
+            {"date": MON, "status": "placed", "kind": "entry", "side": "BUY", "symbol": "RELIANCE"},
+            {"date": MON, "status": "approved", "kind": "flatten", "side": "SELL",
+             "symbol": "RELIANCE"},
+        ], "trades": []}
+        res = risk.check(rel_plan(), cfg, now=NOW, broker=FundsAnswered(), instrument=REL,
+                         record=record)
+        self.assertEqual(verdict(res), "BLOCK")
+        self.assertTrue(any("orders recorded today" in r for r in res["reasons"]), reasons(res))
+        self.assertEqual(res["checks"]["orders_today"], "2 of 2")
+
 
 class Cli(unittest.TestCase):
     def setUp(self):
@@ -447,6 +490,73 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 1)
         doc = json.loads(out)
         self.assertEqual(doc["verdict"], "BLOCK")
+
+    def funds_fixture(self, available):
+        path = os.path.join(self.tmp, "funds.json")
+        doc = {"funds": {"equity": {"available_margin": available}},
+               "margins": {"equity": {"instruments": [
+                   {"instrument_key": KEY, "total_margin": 29840.0}]}}}
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return path
+
+    def test_sufficient_funds_fixture_passes(self):
+        code, out, err = self.run_cli(["--plan", self.plan_path, "--now", "2026-10-26 10:00",
+                                       "--funds", self.funds_fixture(50000.0),
+                                       "--json", "--no-write"])
+        self.assertEqual(code, 0, out + err)
+        doc = json.loads(out)
+        self.assertEqual(doc["verdict"], "PASS", doc["reasons"])
+        self.assertIn("available margin", doc["checks"]["funds"])
+        self.assertIn("required margin", doc["checks"]["margins"])
+
+    def test_insufficient_funds_fixture_blocks(self):
+        code, out, err = self.run_cli(["--plan", self.plan_path, "--now", "2026-10-26 10:00",
+                                       "--funds", self.funds_fixture(100.0),
+                                       "--json", "--no-write"])
+        self.assertEqual(code, 1, out + err)
+        doc = json.loads(out)
+        self.assertEqual(doc["verdict"], "BLOCK")
+        self.assertTrue(any("available margin" in r and "under the entry cost" in r
+                            for r in doc["reasons"]), doc["reasons"])
+
+    def test_funds_only_fixture_reports_margins_not_supplied(self):
+        # the recorded funds envelope carries no margins segment: say so, never invent one
+        path = os.path.join(FIX, "trader-risk", "india", "funds.json")
+        code, out, err = self.run_cli(["--plan", self.plan_path, "--now", "2026-10-26 10:00",
+                                       "--funds", path, "--json", "--no-write"])
+        self.assertEqual(code, 0, out + err)
+        doc = json.loads(out)
+        self.assertEqual(doc["verdict"], "PASS", doc["reasons"])
+        self.assertIn("not supplied by this seam", doc["checks"]["margins"])
+
+    def test_no_broker_flag_keeps_the_not_checked_line(self):
+        code, out, err = self.run_cli(["--plan", self.plan_path, "--now", "2026-10-26 10:00",
+                                       "--json", "--no-write"])
+        self.assertEqual(code, 0, out + err)
+        doc = json.loads(out)
+        self.assertIn("no broker seam: not checked here", doc["checks"]["funds"])
+        self.assertIn("no broker seam: not checked here", doc["checks"]["margins"])
+
+    def test_gzipped_instrument_master_loads(self):
+        master = os.path.join(FIX, "upstox", "instruments-NSE.json.gz")
+        code, out, err = self.run_cli(["--plan", self.plan_path, "--now", "2026-10-26 10:00",
+                                       "--instruments", master, "--json", "--no-write"])
+        self.assertEqual(code, 0, out + err)
+        doc = json.loads(out)
+        self.assertEqual(doc["verdict"], "PASS", doc["reasons"])
+        self.assertIn("lot 1", doc["checks"]["lot_size"])
+
+    def test_plain_instrument_master_loads(self):
+        master = os.path.join(self.tmp, "master.json")
+        with open(master, "w", encoding="utf-8") as fh:
+            json.dump([REL], fh)
+        code, out, err = self.run_cli(["--plan", self.plan_path, "--now", "2026-10-26 10:00",
+                                       "--instruments", master, "--json", "--no-write"])
+        self.assertEqual(code, 0, out + err)
+        doc = json.loads(out)
+        self.assertEqual(doc["verdict"], "PASS", doc["reasons"])
+        self.assertIn("lot 1", doc["checks"]["lot_size"])
 
 
 if __name__ == "__main__":

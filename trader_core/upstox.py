@@ -7,6 +7,7 @@ import time
 from urllib.parse import quote
 
 from trader_core import CLOSE, IST, OPEN
+from trader_core import config as cfgmod
 from trader_core.http import (LIVE, SANDBOX, SandboxUnsupported, UpstoxAPIError, UpstoxAuthError,
                               UpstoxError, default_transport, raise_for_response)
 from trader_core import instruments as instruments_mod
@@ -174,10 +175,10 @@ class Client:
 
     def _token_from_file(self, name):
         """tokens.json holds sandbox/access/analytics tokens only, never a PIN,
-        TOTP secret, or API secret; unknown keys are ignored by construction."""
-        state = self.cfg.get("state_dir")
-        if not state:
-            return None
+        TOTP secret, or API secret; unknown keys are ignored by construction.
+        An empty state_dir means the same default config.state_dir resolves:
+        <repo>/trader/state, so the file is read by default."""
+        state = self.cfg.get("state_dir") or os.path.join(cfgmod.REPO_ROOT, "trader", "state")
         try:
             with open(os.path.join(str(state), "tokens.json"), "r", encoding="utf-8") as fh:
                 doc = json.load(fh)

@@ -121,3 +121,10 @@ def find(rows, symbol, exchange="NSE_EQ"):
     if fallback is None:
         raise InstrumentError("unknown instrument: %s" % symbol)
     return normalize(fallback)
+
+
+def key(rows, symbol, exchange="NSE_EQ"):
+    """The instrument_key for symbol on exchange, InstrumentError when absent.
+    Fail closed: NSE_EQ|SYMBOL is not a valid Upstox key, so callers must never
+    invent one when the master has no row."""
+    return find(rows, symbol, exchange)["instrument_key"]

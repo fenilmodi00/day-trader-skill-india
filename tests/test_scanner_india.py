@@ -371,6 +371,65 @@ class BhavParsing(unittest.TestCase):
         self.assertEqual(cal.load_holidays().get("2026-10-20"), "Dussehra")
 
 
+class LiveDailyCache(unittest.TestCase):
+    """The live daily scan fetches or reuses the last SESSIONS_NEEDED sessions
+    from a bhavcopy cache; the fetch seam is injected, so no network."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.cache = os.path.join(self.tmp, "bhavcopy")
+        self.universe = write_universe(os.path.join(self.tmp, "universe.txt"))
+        self.master = write_master(os.path.join(self.tmp, "master.json"))
+        self.out = os.path.join(self.tmp, "watchlist.json")
+        self.cfg = os.path.join(self.tmp, "config.json")
+        with open(self.cfg, "w", encoding="utf-8") as fh:
+            json.dump({"state_dir": os.path.join(self.tmp, "state")}, fh)
+        self.requested = []
+
+    def fetch(self, day):
+        self.requested.append(day.isoformat())
+        close = 100.0 + (day.toordinal() % 20)
+        text = ("SYMBOL,SERIES,DATE1,PREV_CLOSE,CLOSE_PRICE,TTL_TRD_QNTY,TURNOVER_LACS\n"
+                "RELIANCE,EQ,,100.0,%.2f,500000,5000.0\n"
+                "ADANIENT,EQ,,50.0,%.2f,300000,1500.0\n" % (close, close - 1))
+        return text, "sec_bhavdata_full_%s.csv" % day.strftime("%d%m%Y")
+
+    def daily(self, fetch):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = scan.main(["daily", "--universe", self.universe, "--master", self.master,
+                              "--out", self.out, "--config", self.cfg,
+                              "--bhavcopy-dir", self.cache, "--now", "2026-10-27 18:30",
+                              "--no-write", "--json"], fetch=fetch)
+        text = out.getvalue()
+        return code, (json.loads(text) if text.strip() else None), err.getvalue()
+
+    def test_empty_cache_requests_the_needed_prior_sessions(self):
+        code, doc, err = self.daily(self.fetch)
+        self.assertIn(code, (0, 1), err)
+        self.assertEqual(doc["source"], "nse-bhavcopy")
+        self.assertEqual(doc["sessions_supplied"], scan.SESSIONS_NEEDED)
+        self.assertEqual(len(self.requested), scan.SESSIONS_NEEDED)
+        self.assertEqual(self.requested[-1], "2026-10-27")
+        for iso in self.requested:
+            self.assertTrue(scan.cal.is_trading_day(datetime.date.fromisoformat(iso)), iso)
+        self.assertNotIn("2026-10-20", self.requested)  # Dussehra: no bhavcopy to fetch
+        self.assertEqual(len(os.listdir(self.cache)), scan.SESSIONS_NEEDED)
+
+    def test_warm_cache_downloads_nothing(self):
+        code, doc, err = self.daily(self.fetch)
+        self.assertIn(code, (0, 1), err)
+
+        def boom(day):
+            raise AssertionError("warm cache should not download %s" % day)
+
+        code, doc, err = self.daily(boom)
+        self.assertIn(code, (0, 1), err)
+        self.assertEqual(doc["sessions_supplied"], scan.SESSIONS_NEEDED)
+        self.assertEqual(len(os.listdir(self.cache)), scan.SESSIONS_NEEDED)
+
+
 class CrossCutting(unittest.TestCase):
     def test_no_us_market_strings_in_the_skill(self):
         with open(os.path.join(os.path.dirname(scan.__file__), "SKILL.md"), encoding="utf-8") as fh:

@@ -77,13 +77,16 @@ def day_bar(rows, plan_date, slot):
     return [b for b in bars5_of(rows) if b["dt"].date().isoformat() == plan_date][slot]
 
 
-def plan_flags(rows, plan_date):
+def plan_flags(rows, plan_date, key=KEY):
     """CLI plan flags priced off the plan day's own 10:00 AM bar (bar 8): the
     entry is that bar's close, the stop 5 below, the target 5 above."""
     entry = round(day_bar(rows, plan_date, 8)["c"], 2)
-    return ["--symbol", "RELIANCE", "--date", plan_date,
-            "--entry", str(entry), "--stop", str(entry - 5), "--target", str(entry + 5),
-            "--entry-time", "10:00 AM"]
+    flags = ["--symbol", "RELIANCE", "--date", plan_date,
+             "--entry", str(entry), "--stop", str(entry - 5), "--target", str(entry + 5),
+             "--entry-time", "10:00 AM"]
+    if key:
+        flags += ["--key", key]
+    return flags
 
 
 def run_cli(argv, source=None):
@@ -264,7 +267,7 @@ class DataSide(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(len(src.calls), 1)
         call = src.calls[0]
-        self.assertEqual(call["instrument_key"], "NSE_EQ|RELIANCE")
+        self.assertEqual(call["instrument_key"], KEY)
         self.assertEqual(call["interval"], "1m")
         self.assertEqual(call["end"], "2026-10-26")
         self.assertEqual(call["start"], "2026-09-25")     # one month back
@@ -280,10 +283,22 @@ class DataSide(unittest.TestCase):
         code, out, err = run_cli(argv, src)
         self.assertEqual(code, 0, err)
         doc = json.loads(out)
-        self.assertEqual(src.calls[0]["instrument_key"], "NSE_EQ|RELIANCE")
-        self.assertEqual(doc["data"]["instrument_key"], "NSE_EQ|RELIANCE")
+        self.assertEqual(src.calls[0]["instrument_key"], KEY)
+        self.assertEqual(doc["data"]["instrument_key"], KEY)
         for call in src.calls:
             self.assertNotEqual(call["interval"], "5m")
+
+    def test_missing_instrument_key_errors_and_sends_nothing(self):
+        src = FakeSource(payload_rows(read_payload(FIFTEEN)))
+        argv = ["run", "--symbol", "RELIANCE", "--date", "2026-10-26"] + \
+            plan_flags(payload_rows(read_payload(FIFTEEN)), "2026-10-26", key=None) + \
+            ["--now", "2026-10-26 18:00", "--json"]
+        code, out, err = run_cli(argv, src)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("no instrument_key for RELIANCE: run trader-scanner universe --write "
+                      "or pass --key", err)
+        self.assertEqual(src.calls, [])
 
     def test_30m_payload_is_rejected_as_a_substitute(self):
         argv = ["run", "--offline", THIRTY_M, "--now", "2026-10-26 18:00"] + \

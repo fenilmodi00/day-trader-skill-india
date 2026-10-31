@@ -292,13 +292,24 @@ class QuoteFailures(Base):
         self.assertEqual((code, [f["id"] for f in doc["fired"]]), (0, ["bell-open"]))
 
     def test_check_without_a_source_builds_the_client(self):
-        self.write_rules([{"id": "rel-stop", "symbol": "RELIANCE", "type": "stop",
-                           "price": 1183.65}])
+        self.write_rules([{"id": "rel-stop", "symbol": "RELIANCE", "instrument_key": KEY,
+                           "type": "stop", "price": 1183.65}])
         code, out, err = self.run_cli(["check", "--config", self.config, "--rules", self.rules,
                                        "--now", MON + " 10:00"])
         # the real Client has no reachable Upstox token in tests: reported, exit 2, not a crash
         self.assertEqual(code, 2)
         self.assertIn("re-authenticate", err)
+
+    def test_missing_instrument_key_skips_the_quote(self):
+        rules = [{"id": "rel-above", "symbol": "RELIANCE", "type": "above", "price": 1200.0}]
+        src = FakeSource({KEY: bar(1201.0)})
+        code, doc, _, err = self.check(MON + " 10:00", rules, src, json_mode=True)
+        self.assertEqual(code, 2)
+        self.assertEqual(src.asked, [])
+        self.assertTrue(any("no instrument_key for RELIANCE" in e for e in doc["errors"]), doc)
+        self.assertEqual(doc["fired"], [])
+        self.assertEqual(doc["pending"], [])
+        self.assertNotIn("NSE_EQ|RELIANCE", json.dumps(doc))
 
 
 class FlatBy(Base):

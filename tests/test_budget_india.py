@@ -251,6 +251,25 @@ class Cli(unittest.TestCase):
         self.assertEqual(cfg["session"]["entry_cutoff"], "15:00")
         self.assertEqual(cfg["session"]["mis_square_off_cas"], "15:10")
 
+    def test_bad_now_and_bad_mode_exit_2_one_line(self):
+        path = self.write_plan(rel_legs())
+        master = os.path.join(self.tmp, "master.json")
+        with open(master, "w", encoding="utf-8") as fh:
+            json.dump([REL], fh)
+        code, out, err = self.run_cli(["--plan", path, "--instruments", master,
+                                       "--now", "not-a-time"])
+        self.assertEqual(code, 2)
+        self.assertTrue(err.startswith("trader-budget: "), err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        cfg = os.path.join(self.tmp, "config.json")
+        with open(cfg, "w", encoding="utf-8") as fh:
+            json.dump({"mode": "paper"}, fh)
+        code, out, err = self.run_cli(["--plan", path, "--instruments", master, "--config", cfg])
+        self.assertEqual(code, 2)
+        self.assertIn("mode must be one of", err)
+        self.assertNotIn("Traceback", err)
+
 
 if __name__ == "__main__":
     unittest.main()
