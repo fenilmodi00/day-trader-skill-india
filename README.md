@@ -147,6 +147,24 @@ python3 trader-pelosi/ptr.py index --member pelosi                     # her PTR
 python3 -m unittest discover -s tests -v
 ```
 
+## India prototype (free)
+
+Kite Connect's free Personal plan has no market data, so this prototype proves
+the Indian data path without a key: NSE's public symbol list plus Yahoo's free
+chart endpoint with the `.NS` suffix. Standard-library Python, no broker, no
+orders.
+
+```bash
+python3 trader-india/india.py universe --write                  # NSE EQUITY_L.csv, the EQ series
+python3 trader-india/india.py bars RELIANCE --interval 5m       # IST bars, 09:15 to 15:30
+python3 trader-india/india.py orb RELIANCE --date 2026-10-26    # opening-range breakout, 09:15 IST
+```
+
+Both sources are free and unofficial: NSE can block scraping, Yahoo can lag or
+omit bars. The paid Kite Connect plan (₹500/month per API key) is the
+exchange-grade path for the real port. `tests/test_india.py` runs offline on a
+saved RELIANCE 5-day chart and a trimmed EQUITY_L sample.
+
 The tests run offline, on fixtures cut from real data: TSLA's 5-minute bars
 for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
 TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
@@ -210,6 +228,7 @@ trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py
+trader-india/       india.py (free NSE data prototype, not a skill yet)
 tests/              unittest suite + offline fixtures
 ```
 
