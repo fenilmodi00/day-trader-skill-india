@@ -249,7 +249,7 @@ def run(a):
         instrument = None
         if a.instruments:
             from trader_core import instruments as instruments_mod
-            with open(a.instruments, "r", encoding="utf-8") as fh:
+            with open(a.instruments, "rb") as fh:
                 rows = instruments_mod.load(fh.read())
             instrument = instruments_mod.find(rows, sym)
         if instrument is None:

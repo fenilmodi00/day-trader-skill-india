@@ -2,11 +2,15 @@
 
 import datetime
 import gzip
+import importlib.util
+import inspect
+import io
 import json
 import os
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from _load import FIX, core, load
@@ -541,6 +545,98 @@ class InstrumentsTest(unittest.TestCase):
         forced = client.instruments(refresh=True)
         self.assertEqual(len(forced), 4)
         self.assertEqual(len(transport.calls), 1)
+
+
+class DataSourceSeamTest(unittest.TestCase):
+    """The DataSource protocol: Client implements it, and a fake DataSource
+    drives the scanner and entry seams offline (skill code stays untouched)."""
+
+    def test_client_implements_datasource(self):
+        from trader_core.datasource import DataSource
+        self.assertTrue(issubclass(Client, DataSource))
+        self.assertIsInstance(Client({"state_dir": tempfile.mkdtemp()}), DataSource)
+
+    def test_datasource_is_abstract_over_the_three_seam_methods(self):
+        from trader_core.datasource import DataSource
+        for name in ("quote", "candles", "intraday"):
+            self.assertTrue(getattr(DataSource, name).__isabstractmethod__, name)
+        with self.assertRaises(TypeError):
+            DataSource()  # the seam cannot be instantiated half-built
+
+    def test_client_serves_the_protocol_signatures(self):
+        import inspect
+        for name, params in (("quote", ("keys", "fields")),
+                             ("candles", ("instrument_key", "interval", "start", "end")),
+                             ("intraday", ("instrument_key", "interval"))):
+            got = list(inspect.signature(getattr(Client, name)).parameters)[1:]  # drop self
+            self.assertEqual(got, list(params), name)
+
+    def test_fake_datasource_drives_the_scanner_seam(self):
+        from trader_core.datasource import DataSource
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location("scan", os.path.join(root, "trader-scanner", "scan.py"))
+        scan = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scan)
+
+        class FakeDataSource(DataSource):
+            def __init__(self, rows):
+                self.rows = rows
+                self.asked = []
+
+            def quote(self, keys, fields="ohlc"):
+                return {}
+
+            def candles(self, instrument_key, interval="1m", start=None, end=None):
+                return []
+
+            def intraday(self, instrument_key, interval="5m"):
+                self.asked.append(instrument_key)
+                return self.rows
+
+        with open(os.path.join(FX, "RELIANCE-1m-2026-10-26.json"), encoding="utf-8") as fh:
+            rows = json.load(fh)["data"]["candles"]
+        uni = os.path.join(tempfile.mkdtemp(prefix="dt-ds-"), "universe.txt")
+        with open(uni, "w", encoding="utf-8") as fh:
+            fh.write("RELIANCE|INE002A01018|" + KEY + "\n")
+        self.addCleanup(shutil.rmtree, os.path.dirname(uni), True)
+        src = FakeDataSource(rows)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = scan.main(["orb", "--universe", uni, "--symbols", "RELIANCE",
+                              "--now", "2026-10-26 10:30", "--no-write", "--json"], source=src)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(src.asked, [KEY])
+        rel = json.loads(out.getvalue())["symbols"][0]
+        self.assertEqual(rel["orb"]["price"], 1193.6)
+        self.assertEqual(rel["orb"]["at"], "2026-10-26 10:00 IST")
+
+    def test_fake_datasource_drives_the_entry_seam(self):
+        from trader_core.datasource import DataSource
+
+        class FakeDataSource(DataSource):
+            def __init__(self, rows):
+                self.rows = rows
+
+            def quote(self, keys, fields="ohlc"):
+                return {}
+
+            def candles(self, instrument_key, interval="1m", start=None, end=None):
+                return []
+
+            def intraday(self, instrument_key, interval="5m"):
+                return self.rows
+
+        with open(os.path.join(FX, "RELIANCE-1m-2026-10-26.json"), encoding="utf-8") as fh:
+            rows = json.load(fh)["data"]["candles"]
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location("entry", os.path.join(root, "trader-entry", "entry.py"))
+        entry = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(entry)
+        res = entry.evaluate(FakeDataSource(rows), "RELIANCE", KEY,
+                             datetime.date(2026, 10, 26),
+                             datetime.datetime(2026, 10, 26, 10, 0, tzinfo=core().IST))
+        self.assertEqual(res["status"], "triggered")
+        self.assertEqual(res["trigger"]["price"], 1193.6)
 
 
 class TokenFileTest(unittest.TestCase):
