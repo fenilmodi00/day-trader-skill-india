@@ -1,0 +1,11 @@
+[
+  {"instrument_key": "NSE_FO|9992600", "exchange_token": "9992600", "trading_symbol": "NIFTY",
+   "instrument_type": "FUT", "lot_size": 75.0, "tick_size": 5.0, "freeze_quantity": 1800.0,
+   "expiry": "2026-11-26"},
+  {"instrument_key": "NSE_EQ|INE002A01018", "exchange_token": "2885", "trading_symbol": "RELIANCE",
+   "instrument_type": "EQ", "lot_size": 1.0, "tick_size": 5.0, "freeze_quantity": 11111.0},
+  {"instrument_key": "NSE_EQ|INE467B01029", "exchange_token": "11536", "trading_symbol": "TCS",
+   "instrument_type": "EQ", "lot_size": 1.0, "tick_size": 100.0, "freeze_quantity": 10000.0},
+  {"instrument_key": "NSE_FO|3500", "exchange_token": "3500", "trading_symbol": "TICK10",
+   "instrument_type": "FUT", "lot_size": 10.0, "tick_size": 1000.0, "freeze_quantity": 900.0}
+]

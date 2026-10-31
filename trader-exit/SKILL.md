@@ -1,132 +1,129 @@
 ---
 name: trader-exit
 description: >-
-  Exit Planner. Sets your stop and your target before you enter, so you know
-  when to get out. Reads the entry from trader-entry (or a price you give),
-  puts the stop at the opening-range midpoint by default (or the range low,
-  your price, a percent, or a multiple of the ATR), rounds it down to the
-  cent, and sets the target at 2R (or 1R, or your price). Refuses a stop at or
-  above the entry, a target at or below it, or a stop too tight to survive the
-  spread, and says why. Writes trader/plan.json for the Time Machine, the
-  Budget Manager and Price Alerts. Long side only. Use when the user says
-  "where's my stop", "set my stop and target", "plan the exit", "when do I get
-  out", "stop loss", "what's my R", "risk reward", or right after
-  /trader-entry triggers, before /trader-timemachine.
-argument-hint: "[--stop or-mid|or-low|price:X|pct:X|atr:K] [--target 2R|1R|price:X]"
+  Exit Planner for the NSE: sets the stop and the target BEFORE the entry, so
+  you know when to get out. Stops: opening-range midpoint, opening-range low,
+  price, percent, or ATR on the session's 5-minute Upstox bars; targets: 1R,
+  2R or a price. Every price snaps to the instrument's tick_size, the stop
+  rounding away from the entry (never widening risk), with a one-tick minimum
+  risk. The plan carries the Upstox instrument_key, tick and lot sizes, an
+  optional whole-lot quantity sized from --budget, and flat-by 15:10 IST: no
+  overnight hold. Reads trader/entry.json, writes trader/plan.json. All times
+  IST, all money INR. Use when the user says "set my stop", "what is my
+  target", "plan the exit", "where do I get out", or any time an entry is
+  about to be taken and the exit must exist first.
+argument-hint: "[plan | show] [--stop or-mid|or-low|pct:X|atr:K] [--target 2R]"
 ---
 
 # trader-exit
 
-The Exit Planner decides how a trade ends before it starts. The stop is where
-the setup has failed. The target is where you take what you came for. Both
-are set BEFORE the entry, written down and handed on, so nobody has to decide
-anything in the middle of a fast move. A stop is a plan, not a guarantee: a
-gap or a fast market can fill past it. Day trading loses most people money,
-and a neat plan does not change that.
+The Exit Planner is the gate before an entry: it writes down the stop and
+the target before you buy, so the way out exists before the way in. A stop
+written after a fill is a hope, not a plan.
+
+This is not financial advice. The planner never places an order and never
+will: nothing goes to the broker without you saying yes, out loud, to
+trader-broker. `exit.py` only prints the plan and writes `trader/plan.json`.
+
+Everything runs on the sandbox by default (`mode: "sandbox"` in
+`trader/config.json`). Only the optional ATR stop reads market data (Upstox
+intraday bars); the math itself is offline.
 
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
 
+## Quick start
+
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/exit.py" plan                          # trader/entry.json: midpoint stop, 2R target
-python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --stop or-mid --target 1R --write
-python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --stop atr:1.5           # needs the session's bars (Yahoo or --offline)
-python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --symbol TSLA --entry 364.18 --or-high 362.18 --or-low 354.47
-python3 "${CLAUDE_SKILL_DIR}/exit.py" show                          # the current trader/plan.json
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --from trader/entry.json --write trader/plan.json
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --stop or-mid --target 1R --json
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --symbol RELIANCE --key "NSE_EQ|INE002A01018" \
+  --entry 1193.60 --or-high 1192.00 --or-low 1175.30 --master tests/fixtures/upstox/instruments-NSE.json.gz
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --stop atr:1.5 --offline tests/fixtures/upstox/RELIANCE-1m-2026-10-26.json
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --symbol TCS --entry 3120.00 --setup level --stop pct:1
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --budget 50000 --master tests/fixtures/upstox/instruments-NSE.json.gz
+python3 "${CLAUDE_SKILL_DIR}/exit.py" show
 ```
 
-Other flags: `--flat-by 15:55`, `--json`, `--now "2026-10-19 10:15"` (New
-York time), `--entry PRICE` with a waiting entry.json to plan ahead, `--setup
-level`, `--offline FILE` (a saved Yahoo chart JSON for an ATR stop).
+Flags: `--from PATH` (default `trader/entry.json`), `--symbol`, `--key`,
+`--entry PRICE`, `--or-high`, `--or-low`, `--or-minutes 15`, `--setup
+orb|level`, `--date`, `--time`, `--entry-bar`, `--stop`, `--target 2R`,
+`--flat-by HH:MM`, `--master FILE` (Upstox instrument master, .json or
+.json.gz: supplies `tick_size` and `lot_size`), `--tick`/`--lot` by hand,
+`--budget INR` (whole-lot sizing), `--offline PATH` (a recorded Upstox 1m
+fixture for the ATR stop), `--now "2026-10-26 10:05"` (IST), `--write
+[PATH]` (default `trader/plan.json`), `--json`, `--config`. Exit codes:
+`plan` 0 = a plan, 1 = refused or an error; `show` 0 = a plan exists.
+
+## Stops and targets
+
+Stops (a long's stop sits under the entry and rounds DOWN to the tick,
+away from the entry, never widening the risk):
+
+- `or-mid`: the opening-range midpoint, the default for an orb entry. The
+  RELIANCE case: (1192.00 + 1175.30) / 2 = 1183.65, already on the 0.05
+  tick grid, risk 9.95 a share.
+- `or-low`: the opening-range low.
+- `price:X`: your price.
+- `pct:X`: X percent under the entry.
+- `atr:K`: K times the 14-bar ATR under the entry, on the session's 5m bars
+  up to the entry bar (`--offline FILE`, Upstox 1m resampled). With fewer
+  than 14 bars it averages all of them and says so. A level setup has no
+  opening-range default: give a stop.
+
+Targets (rounded UP to the tick, away from the entry, so rounding never
+pays less than planned): `2R` (default), `1R`, `1.5R ...` = entry + R x
+risk, or `price:X`. The rounding mode is away from the entry on both legs:
+the stop is never closer to the entry and the target never closer than the
+plan. A risk smaller than one tick is widened back to one tick (the
+smallest risk the exchange can price); a tick-1 or tick-10 instrument
+rounds on its own grid the same way.
+
+## The plan
+
+`plan` writes `trader/plan.json`:
+
+```json
+{"symbol": "RELIANCE", "instrument_key": "NSE_EQ|INE002A01018", "date": "2026-10-26",
+ "direction": "long", "entry": 1193.6, "stop": 1183.65, "target": 1203.55,
+ "tick_size": 0.05, "lot_size": 1, "quantity": 25, "risk_per_share": 9.95,
+ "risk_inr": 248.75, "reward_risk": 1.0, "product": "I", "flat_by": "15:10",
+ "legs": [], "source": "trader-exit", "generated_at": "2026-10-26 10:00:05 IST"}
+```
+
+- `instrument_key`, `tick_size` and `lot_size` come from `--master` (or the
+  entry.json written by trader-entry); without an instrument row the prices
+  stay unrounded and `tick_size`/`lot_size` are left out, never guessed.
+- `--budget INR` sizes `quantity` to whole lots the same way trader-budget
+  sizes: floor(cap / (risk x lot)) x lot, where the cap is the budget or
+  the account's `max_loss_per_trade_inr`, whichever is smaller. The
+  RELIANCE case: 250.00 max loss / 9.95 risk = 25 shares. Sizing needs the
+  lot size and the risk; when the inputs are absent `quantity` is left out.
+- `legs` are the three Upstox v3 order payloads (entry LIMIT, stop SL-M,
+  target LIMIT) built with `trader_core.orders.leg`/`plan` once a quantity
+  exists; trader-broker reads them after your explicit yes.
+- `flat_by` is 15:10 IST from `session.flat_by` in `trader/config.json`:
+  flat by then, win or lose, no overnight hold. An entry at or after
+  flat-by is refused.
+- Refused, with the reason: a stop at or above the entry, a target at or
+  below it, a risk under the one-tick floor with no room to widen, an
+  entry.json that has not triggered (unless you give `--entry`), a short
+  (long only), a non-trading day.
 
 ## What it reads and writes
 
 | file | what |
 | --- | --- |
-| `trader/entry.json` | the trigger from trader-entry: symbol, entry price, time, bar, opening range |
-| `trader/config.json` | `flat_by` (15:55) and `min_reward_risk` (1.0: a note here, trader-risk enforces it) |
-| Yahoo chart API | only for an `atr:K` stop: the session's bars up to the entry bar, free and unofficial |
-| `trader/plan.json` | with `--write`: entry, stop and its rule, target and its R, risk a share, reward:risk, flat by. trader-timemachine, trader-budget and trader-alerts read it |
+| `trader/entry.json` | the trigger from trader-entry (symbol, instrument_key, price, opening_range, time) |
+| `trader/plan.json` | the plan above; trader-budget sizes it further, trader-risk vets it, trader-timemachine replays it, trader-broker places it after your yes |
+| `trader/config.json` | optional; `session.flat_by` and `account.max_loss_per_trade_inr` matter here, sandbox is the default when it is absent |
 
-## Stops and targets
+## Where it sits in the chain
 
-| stop | where it goes |
-| --- | --- |
-| `or-mid` | the opening-range midpoint (the default for an opening-range breakout) |
-| `or-low` | the opening-range low: wider, so fewer shares for the same max loss |
-| `price:X` | your price |
-| `pct:X` | X percent under the entry |
-| `atr:K` | K times the 14-bar ATR under the entry, on the session's bars up to the entry bar. With fewer than 14 bars by then it averages all of them and says so |
+1. `/trader-entry` triggers and writes `trader/entry.json`.
+2. `exit.py plan --from trader/entry.json --write trader/plan.json` sets the
+   exit BEFORE the buy.
+3. `/trader-timemachine` replays it, `/trader-budget` sizes it, /trader-risk
+   vets it, and only `/trader-broker` after your explicit yes places it.
 
-A level setup has no opening range to lean on, so it needs a stop you name.
-
-- **Rounding.** The stop rounds AWAY from the entry to the cent (down, for a
-  long). Risk = entry minus stop. Target = entry + R x risk, rounded half up
-  to the cent. `2R` by default; `1R`, `1.5R` or `price:X` also work.
-- **Refused, with the reason.** A stop at or above the entry. A target at or
-  below it. A risk under 0.05% of the price: too tight to survive the
-  spread, normal wiggle would stop you out. An entry.json that has not
-  triggered (unless you give `--entry`). A short: v2 plans longs only.
-- **Flat by.** 15:55 by default (or `flat_by` in the config). Out by then,
-  win or lose, no overnight hold. On a 1:00 p.m. early close it moves up to
-  12:55. An entry at or after the flat-by time is refused.
-
-## Steps
-
-1. Run it right after `/trader-entry` triggers. Before that, `--entry PRICE`
-   plans ahead at the level you expect.
-2. Use the default stop for an opening-range breakout unless the user names
-   another. A level setup needs one: ask.
-3. Run `exit.py plan --write`. Read back the entry, the stop and its rule,
-   the target and its rule, the risk a share, reward:risk and flat by.
-4. If it refuses, say the reason and the fix (a wider stop, a farther
-   target). Never loosen anything on your own.
-5. Say once that the stop is a plan, not a guarantee.
-6. Hand off to `/trader-timemachine` to replay the plan, then `/trader-budget`
-   to size it to the max loss per trade. Offer `/trader-alerts` for the stop,
-   the target and the flat-by time. Claude can keep `entry.py watch` running
-   in the background or on a `/loop` until a setup triggers, then come here.
-
-## Example: the reel
-
-TSLA, Monday 2026-10-19. The entry is 364.18 at 10:15 AM (the 10:10 bar,
-bar 8) and the opening range is 354.47 to 362.18. `exit.py plan --stop
-or-mid --target 1R --write`:
-
-```
-Exit plan: TSLA long, Mon 2026-10-19, opening-range breakout on 5-minute bars
-  Entry         $364.18 at 10:15 AM (bar 8)
-  Stop          $358.32  opening-range midpoint: ($362.18 + $354.47) / 2 = $358.325, rounded down
-  Target        $370.04  1R (one times the risk)
-  Risk a share  $5.86 (1.61% of the entry)
-  Reward:risk   1.0
-  Flat by       15:55 ET, win or lose: no overnight hold
-```
-
-The default 2R target would be 364.18 + 2 x 5.86 = 375.90. trader-budget then
-sizes it: a $50 max loss per trade buys floor(50 / 5.86) = 8 shares.
-
-## Rules
-
-- The stop and the target are set before the entry, never after.
-- Never move a stop further from the entry once the trade is on.
-- Plain numbers only: entry, stop, target, risk a share, reward:risk. It
-  never prints a P&L or a return.
-- Nothing here promises winning trades or money. A 1R target is not a
-  prediction that the price gets there.
-- Long side only. v2 plans longs only.
-
-## What it never does
-
-It never places an order, never sizes a position, never widens a stop to
-make a plan pass, and never calls a stop a guarantee.
-
-## Safety
-
-- Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+A stop is a plan, not a guarantee: a gap or a fast market can fill past it.
+Times are IST everywhere; prices are INR. Nothing here places an order.

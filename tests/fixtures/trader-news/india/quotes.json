@@ -1,0 +1,4 @@
+{"status":"success","data":{
+ "NSE_EQ:RELIANCE":{"last_price":103.4,"net_change":3.4,"ohlc":{"open":100.0,"high":103.4,"low":100.0,"close":100.0,"volume":1000},"timestamp":"2026-10-26T10:00:00+05:30"},
+ "NSE_EQ:TCS":{"last_price":101.1,"net_change":1.1,"ohlc":{"open":100.0,"high":101.1,"low":100.0,"close":100.0,"volume":1000},"timestamp":"2026-10-26T10:00:00+05:30"}
+}}

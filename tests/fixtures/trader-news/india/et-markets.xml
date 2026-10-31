@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Economic Times Markets</title>
+    <item>
+      <title>Adani Enterprises placed under ASM framework by NSE</title>
+      <link>https://economictimes.indiatimes.com/adani-asm.html</link>
+      <guid isPermaLink="false">e1</guid>
+      <description>ASM surveillance measure.</description>
+      <pubDate>Mon, 26 Oct 2026 10:15:00 +0530</pubDate>
+    </item>
+    <item>
+      <title>Circuit limit revised for Zomato after volatility</title>
+      <link>https://economictimes.indiatimes.com/zomato-circuit.html</link>
+      <guid isPermaLink="false">e2</guid>
+      <description>Price band changed.</description>
+      <pubDate>Mon, 26 Oct 2026 10:20:00 +0530</pubDate>
+    </item>
+    <item>
+      <title>Delisting proposed for XYZ Ltd</title>
+      <link>https://economictimes.indiatimes.com/xyz-delisting.html</link>
+      <guid isPermaLink="false">e3</guid>
+      <description>Delisting notice.</description>
+      <pubDate>Mon, 26 Oct 2026 10:25:00 +0530</pubDate>
+    </item>
+    <item>
+      <title>Credit rating upgraded for Reliance by Crisil</title>
+      <link>https://economictimes.indiatimes.com/reliance-rating.html</link>
+      <guid isPermaLink="false">e4</guid>
+      <description>Rating action.</description>
+      <pubDate>Mon, 26 Oct 2026 10:30:00 +0530</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+trader/state/
+trader/config.json
+trader/tokens*.json
+.env
+.env.*
+.venv/
+*.egg-info/

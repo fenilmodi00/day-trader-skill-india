@@ -1,9 +1,17 @@
 {
   "rules": [
-    {"id": "opening-bell", "type": "opening_bell"},
-    {"id": "tsla-plan-stop", "symbol": "TSLA", "type": "stop", "price": 358.32, "note": "plan stop: opening-range midpoint", "date": "2026-10-19"},
-    {"id": "tsla-plan-target", "symbol": "TSLA", "type": "target", "price": 370.04, "note": "plan target: 1R (one times the risk)", "date": "2026-10-19"},
-    {"id": "tsla-flat-by", "symbol": "TSLA", "type": "time", "at": "15:55", "label": "flat by close", "before_close": true, "date": "2026-10-19"},
-    {"id": "tsla-move-3", "symbol": "TSLA", "type": "pct_move", "pct": 3}
+    {"id": "bell-preopen", "type": "bell", "bell": "preopen", "note": "09:00 IST pre-open"},
+    {"id": "bell-open", "type": "bell", "bell": "open", "note": "09:15 IST open"},
+    {"id": "bell-close", "type": "bell", "bell": "close", "note": "15:30 IST close"},
+    {"id": "RELIANCE-above-1200", "symbol": "RELIANCE", "instrument_key": "NSE_EQ|INE002A01018",
+     "type": "above", "price": 1200.0, "note": "breakout watch, INR"},
+    {"id": "RELIANCE-below-1170", "symbol": "RELIANCE", "instrument_key": "NSE_EQ|INE002A01018",
+     "type": "below", "price": 1170.0, "note": "weakness watch, INR"},
+    {"id": "RELIANCE-stop", "symbol": "RELIANCE", "instrument_key": "NSE_EQ|INE002A01018",
+     "type": "stop", "price": 1183.65, "note": "plan stop: opening-range midpoint, INR"},
+    {"id": "RELIANCE-target", "symbol": "RELIANCE", "instrument_key": "NSE_EQ|INE002A01018",
+     "type": "target", "price": 1203.55, "note": "plan target: 1R, INR"},
+    {"id": "RELIANCE-flat-by", "symbol": "RELIANCE", "type": "flat_by", "at": "15:10",
+     "label": "flat by 15:10 IST", "note": "close the intraday position before MIS square-off"}
   ]
 }

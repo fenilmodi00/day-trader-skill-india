@@ -1,172 +1,194 @@
 ---
 name: trader-risk
 description: >-
-  Risk Manager. Checks every trade against your limits and stops anything
-  over them, before it can reach the broker. For a day trade: a stop is
-  required, the loss at the stop must fit your max loss per trade (measured
-  from the higher of the plan's entry and a fresh price), reward:risk must
-  meet your minimum, the day's total risk must fit your daily loss limit, no
-  more than your trades per day, and no new entries outside your entry
-  window or when the market is closed. It also keeps the basics: blocked
-  tickers, order size, position cap, cash buffer, margin, short sales,
-  options and crypto, malformed or bad bracket orders, duplicates and a daily
-  order limit. Getting out is never blocked by a day limit. Prints PASS or
-  BLOCK with the reason and records the verdicts so trader-broker only shows
-  an order that passed. Use when the user says "check my order", "is this
-  safe", "risk check", "does this break my rules", "can I take this trade",
-  "how much have I risked today", or before /trader-broker, always.
-argument-hint: "[path to orders.json]"
+  Risk Manager for Indian markets. Checks every sized plan against your
+  limits and stops anything over them, before it can reach the broker, all
+  on the IST clock via trader_core. The loss at the stop, measured net of
+  charges (STT, exchange, SEBI, stamp duty, GST, your brokerage), must fit
+  your max loss per trade in INR, reward:risk must meet your minimum, the
+  day's realized loss must fit your daily cap, no more than your trades per
+  day, and no new entries outside the entry window (09:30 to 15:00 IST by
+  default; flat by 15:10, MIS square-off 15:25, or 15:10 on CAS accounts).
+  It also keeps the basics: the two-leg plan validates as a set, quantity on
+  whole exchange lots, prices on the tick grid (0.05, 1 or 10), the freeze
+  quantity, MIS eligibility (product I, NSE_MIS), available margin and
+  required margin through the Upstox broker seam, duplicate tags, long-only
+  and your own ban/ASM/GSM lists as warnings. Weekends and NSE holidays are
+  closed. A BLOCK is a verdict, not a crash: it prints PASS or BLOCK with
+  the reasons and records the verdict so trader-broker only shows a plan
+  that passed. Use when the user says "check my order", "is this safe",
+  "risk check", "does this break my rules", "can I take this trade", "how
+  much have I risked today", or before /trader-broker, always.
+argument-hint: "[path to plan.json]"
 ---
 
 # trader-risk
 
-The Risk Manager is the gate between a proposal and the broker. Every order
-written by trader-budget or trader-broker's flatten passes through it. A
-BLOCK is final for that order: it does not go to the user for a yes, and it
-does not go to the broker. Most people who day trade lose money. These limits
-keep each loss and each day's losses small. They do not make a trade win.
+The Risk Manager is the gate between a sized plan and the broker. Every plan
+written by trader-budget passes through it before trader-broker may show it.
+A BLOCK is final for that plan: it does not go to the user for a yes, and it
+does not go to the broker. Most people who day trade lose money. These
+limits keep each loss and each day's losses small. They do not make a trade
+win.
 
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/check.py"                           # trader/ files; writes trader/state/risk.json
-python3 "${CLAUDE_SKILL_DIR}/check.py" --json
-python3 "${CLAUDE_SKILL_DIR}/check.py" --no-write                # look without recording
-python3 "${CLAUDE_SKILL_DIR}/check.py" --now "2026-10-19 10:15"  # pin the clock (New York time)
+python3 "${CLAUDE_SKILL_DIR}/check.py" --config trader-budget/config.example.json
+python3 "${CLAUDE_SKILL_DIR}/check.py" --config trader-budget/config.example.json --json
+python3 "${CLAUDE_SKILL_DIR}/check.py" --config trader-budget/config.example.json --no-write
+python3 "${CLAUDE_SKILL_DIR}/check.py" --config trader-budget/config.example.json --now "2026-10-26 10:00"
 ```
+
+Exit codes: 0 PASS, 1 BLOCK (a verdict, not an error), 2 bad input. With
+`--json` the verdict prints to stdout and is recorded to
+`trader/state/risk.json` unless `--no-write`.
 
 ## What it reads and writes
 
 | file | what |
 | --- | --- |
-| `trader/orders.json` | the proposed orders (trader-budget, or trader-broker's flatten) |
+| `trader/plan.json` | the sized two-leg plan (trader-budget prints it; save it here) |
 | `trader/config.json` | the limits (trader-budget ships `config.example.json`) |
-| `trader/portfolio.json` | cash and holdings; if missing, a fresh account funded with the budget |
-| `trader/prices.json` | a fresh price raises the entry it measures risk from; also values holdings |
-| `trader/state/broker.json` | what was placed today: duplicates, trades per day, daily loss, day trades |
-| `trader/state/risk.json` | the verdicts it writes, with a fingerprint of each exact order |
+| `--instruments` file | a recorded Upstox master slice, for lot, tick and freeze |
+| `trader/state/orders.json` | what was approved or placed today: trades per day, daily loss, duplicate tags |
+| `trader/state/risk.json` | the verdict it writes, with the plan attached |
 
-## Entries and exits
+## The IST clock
 
-An **entry** opens or adds to a position: a buy, or a sell that would go
-short. An **exit** only reduces what you already hold. Getting out must
-always be possible, so an exit is checked for format, asset and short sales
-only. Every other rule (day limits, entry window, loss, reward:risk, blocked
-list, size, duplicates) turns into a warning for an exit, never a BLOCK.
+All times are IST, fixed at UTC+05:30 all year: the clock never shifts. It
+lives in trader_core (`timeutil.now_ist`, `parse_ist`), not in the local
+machine's zone, and `--now "2026-10-26 10:00"` pins it for tests and replays.
+The session opens 09:15 and closes 15:30. New entries run from
+`session.entry_start` (09:30) to `session.entry_cutoff` (15:00), the plan
+must be flat by `session.flat_by` (15:10), and the broker auto-squares-off
+MIS positions at `session.mis_square_off` (15:25), or 15:10 when the user's
+account is on the CAS timetable (`session.mis_square_off_cas`). Weekends and
+the NSE holidays in `trader_core/data/nse_holidays.json` are closed days;
+the calendar module decides, not a hardcoded list.
 
 ## The checks
 
-Orders are checked in file order, as if each passed order had filled, so a
-batch that is fine order by order but breaks a limit together is caught.
+Every check reads the plan, the config and the recorded state. The plan is
+judged as a set first: entry, stop and target legs with the right sides,
+product and quantities.
 
 | check | blocks when |
 | --- | --- |
-| format | no symbol, side not buy or sell, both or neither of qty and notional, a notional order that is not market + day (Alpaca's rule), a limit order with no limit price; a bracket that is not whole shares, not `day` or `gtc`, or misses its stop-loss or take-profit |
-| asset | an option symbol while `allow_options` is false; crypto or anything that is not a US stock or ETF ticker |
-| short | a sell of more than you hold (`allow_short` false) |
-| blocked | (entries) the ticker is on the `blocked` list |
-| size | (entries) under `min_order_usd` or over `max_order_usd` |
-| position | (entries) the stock would be over `max_position_pct` of the account |
-| cash | (entries) the buy would leave less than the cash buffer, or need margin |
-| stop | (entries) no stop while `require_stop` is true (a bracket `stop_loss_stop_price`, or the order's plan stop); a stop on the wrong side of the entry |
-| loss | (entries) qty x (entry minus stop) over `max_loss_per_trade_usd` |
-| reward:risk | (entries) (target minus entry) / (entry minus stop) under `min_reward_risk` |
-| daily loss | (entries) the max losses at the stops of today's entries, plus this one, over `max_daily_loss_usd` |
-| trades | (entries) `max_trades_per_day` entries already placed today |
-| window | (entries) before `no_entries_before` or after `no_entries_after`, or the market is closed |
-| pdt | (entries, only with `pdt_guard` true) 3 day trades already in the last 5 business days |
-| duplicate | (entries) the same symbol and side twice in one batch, or already placed today |
-| daily limit | (entries) `max_orders_per_day` orders already placed today |
+| plan | the two legs do not validate as a set: a missing leg, a wrong side, a stop at or above the entry, a target at or below it, a quantity off-lot, a price off-grid, or a product the config does not allow |
+| max loss | quantity x (entry minus stop) is over `account.max_loss_per_trade_inr` |
+| daily loss | the day's realized P&L in `trader/state/orders.json` is at or past `account.max_daily_loss_inr` |
+| trades | `account.max_trades_per_day` entries are already approved or placed today |
+| orders | `account.max_orders_per_day` orders are already approved or placed today (an entry and its flatten both count) |
+| reward:risk | (target minus entry) / (entry minus stop) is under `account.min_reward_risk` |
+| window | now is before `entry_start`, at or after `entry_cutoff`, or the NSE is closed (weekend or holiday) |
+| freeze | the quantity is above the instrument's freeze quantity (NIFTY 1800, from the master) |
+| lot size | the quantity is not a whole multiple of the lot size (equity lot 1, F&O lots from the master) |
+| tick | any leg price or trigger is off the tick grid: 0.05 equity, 1 F&O price bands, 10 where the master says 10 |
+| mis | the plan's product is not the intraday MIS product I (`risk.mis_products`, product codes, default `["I"]`; the older `NSE_MIS` spelling still passes); D and MTF are blocked here |
+| funds | the broker seam's available margin is missing or under the entry cost |
+| margins | the broker seam errors, or required margin is far above the entry cost (a warning) |
+| duplicate | a leg tag was already approved or placed today |
+| charges | the loss at the stop net of STT, exchange, SEBI, stamp duty, GST and brokerage is over the cap, even when the gross loss fits |
+| long only | the plan direction is short while `account.long_only` is true (the default) |
+| blocked | the symbol is on your `risk.blocked_symbols` list; the ASM, GSM and ban lists only warn |
 
-How the numbers work:
+The charges check runs through `trader_core.charges.round_trip`: on the
+example RELIANCE plan the gross loss at the stop is Rs 248.75, charges add
+Rs 45.53, so a Rs 250 cap blocks it and a Rs 300 cap passes. Set the
+brokerage in `charges.brokerage_bps` or `charges.brokerage_per_order_inr`.
 
-- **The entry it measures from**: the limit price for a limit order. For a
-  market order, the HIGHER of the plan's entry and a fresh price from
-  `trader/prices.json` (under 15 minutes old). A plan written at 10:15 cannot
-  understate the risk at 10:55 after the price ran up. An older price is not
-  used, and it says so.
-- **Daily loss** counts the full max loss of every entry placed today, win or
-  lose, as trader-broker logged it. Three full-size trades use up a $150 day.
-- **The window** is New York time, worked out in the tool (daylight saving
-  included), never from the computer's clock zone. Weekends and NYSE holidays
-  are closed. On a 1:00 p.m. early close the window ends 3 hours earlier too.
-  Set both `no_entries_*` to null to switch the window off.
-- **pdt_guard** (off by default) counts a day trade as a symbol bought and
-  sold on the same day in the log, plus any entry placed today (it is meant
-  to be flat by the close). FINRA removed the $25,000 pattern-day-trader
-  minimum (Regulatory Notice 26-10, effective June 4, 2026; firms may phase
-  in until October 20, 2027), so some brokers still apply the old rule: turn
-  `pdt_guard` on if yours does.
+Funds and margins go through the injected broker seam (an UpstoxBroker in
+the CLI path). A missing or failed answer is a reason, never a silent pass;
+without a seam the check says "not checked here" and the broker skill
+confirms funds at placement time.
 
-Warnings do not block, but say them to the user: a LIVE account, a number
-sent as a number instead of a string, a stop that lives only in the plan and
-not at the broker, a price too old to use, an early close today.
+Warnings never block: a symbol on the user's own `risk.ban_symbols`,
+`risk.asm_symbols` or `risk.gsm_symbols` list in the config (no live
+surveillance feed is checked, the user maintains the lists), or margin
+required well above the entry cost.
 
 ## Steps
 
-1. If the price may have moved since the plan, refresh it first
-   (trader-alerts: `alerts.py quote TSLA --write`).
-2. Run `check.py`. Exit code 0 means every order passed, 1 means at least one
-   was blocked.
-3. Tell the user the result in plain words, order by order: the max loss at
-   the stop, reward:risk, and how much of today's limits it uses. For a
-   BLOCK, give the reason and the fix (fewer shares, a closer stop from
+1. Size the plan first if it is not sized yet (trader-budget), then run
+   `check.py`. Exit code 0 means PASS, 1 means BLOCK.
+2. Tell the user the result in plain words: the max loss at the stop net of
+   charges, reward:risk, and how much of today's limits it uses. For a
+   BLOCK, give the reason and the fix (fewer lots, a closer stop from
    trader-exit, wait for the window, or skip the trade). Never change a
    limit yourself.
-4. If the order changes in any way, run the check again. trader-broker matches
-   each order to its verdict by fingerprint, so an edited order is not ready
-   until it passes again, and a verdict from yesterday does not count today.
+3. If the plan changes in any way, run the check again. trader-broker
+   matches the verdict to the plan, so an edited plan is not ready until it
+   passes again, and a verdict from yesterday does not count today.
 
 ## Example: the reel
 
-The TSLA bracket from trader-budget at 10:15 AM on Monday 2026-10-19, on a
-fresh $5,000 paper account with the example config:
+The RELIANCE plan at 10:00 IST on Monday 2026-10-26: entry 1193.60, stop
+1183.65, target 1203.55, 25 shares, with the max loss set to Rs 300:
 
 ```
-PASS  #1 buy TSLA 8 shares, entry
-          entry 364.18 (the plan's entry), stop 358.32, target 370.04: risk 5.86 a share
-          max loss $46.88 (limit $50), reward:risk 1.00 (min 1)
-          today before this: 0 of 3 trades, $0 of $150 daily loss
+PASS RELIANCE at 2026-10-26 10:00 IST
+  plan         two-leg plan validates as a set
+  max_loss     Rs 248.75 of Rs 300 max loss per trade
+  daily_loss   Rs 0 realized today of Rs 500 cap
+  trades_today 0 of 3
+  reward_risk  1.0 (minimum 1.0)
+  entry_window 09:30 to 15:00 IST, now 10:00
+  freeze       no freeze data
+  lot_size     quantity 25 on lot 1
+  tick         prices on the 0.05 grid
+  mis          product I (MIS intraday)
+  funds        no broker seam: not checked here (the broker skill confirms funds)
+  margins      no broker seam: not checked here
+  duplicate    tag dt-entry-orb not recorded
+  charges      net loss at the stop Rs 294.28 after Rs 45.53 charges (gross Rs 248.75)
+  long_only    long only
 
-1 passed, 0 blocked at 2026-10-19 10:15 New York. Cash after the passed orders: $2,086.56 (paper account).
+Every check passed. trader-broker still asks you yes or no before anything is placed.
+Education and tooling, not financial advice.
 ```
 
-One more share and it is blocked:
+The same plan with the cap at Rs 250: the gross Rs 248.75 fits, but the net
+Rs 294.28 after Rs 45.53 of charges does not, so it is blocked:
 
 ```
-BLOCK #1 buy TSLA 9 shares, entry
-          entry 364.18 (the plan's entry), stop 358.32, target 370.04: risk 5.86 a share
-          max loss $52.74 (limit $50), reward:risk 1.00 (min 1)
-          today before this: 0 of 3 trades, $0 of $150 daily loss
-        - loss: 9 shares x 5.86 risk a share = $52.74 at the stop, over your $50 max loss per trade
+  - charges-adjusted loss Rs 294.28 (charges Rs 45.53) is over your Rs 250 max loss per trade; the gross loss Rs 248.75 fits, the net does not
 ```
 
-The same 8 shares checked at 10:55 with the real 10:52 quote (366.48) in
-`trader/prices.json` are blocked twice: 8 x 8.16 = $65.28 at the stop, and
-reward:risk 0.44. At 9:40 they are blocked by the window (no new entries
-before 9:45). The 3:55 PM sell that closes the position passes, even though
-it is after the 3:30 entry cutoff: it is an exit.
+At 09:29 the plan is blocked by the window ("entries run 09:30 to 15:00
+IST, it is now 09:29"), at 15:01 by the cutoff, and a 1875-unit NIFTY plan
+is blocked by the 1800 freeze quantity.
 
 ## Rules
 
-- A PASS only means the order is allowed to be shown to the user. It is not a yes.
-- Every number comes from the config, the order, the portfolio, the prices or the broker log.
-- Free Yahoo prices are unofficial and can lag; the broker's price is the one that fills, and a
-  stop can fill worse than its price in a fast market.
+- A PASS only means the plan is allowed to be shown to the user. It is not
+  a yes.
+- Every number comes from the config, the plan, the recorded state or the
+  broker seam. Nothing is guessed.
+- Getting out is never the risk check's business here: this skill judges
+  the entry plan as a whole. The exit legs are part of the plan it checks.
+- Upstox prices can lag; the broker's price is the one that fills, and a
+  stop can fill worse than its trigger in a fast market.
 
 ## What it never does
 
-It never places an order, never edits an order to make it pass, never
-loosens a limit, never blocks a sell that only gets the user out, and never
-treats a PASS as the user's yes.
+It never places an order, never edits a plan to make it pass, never loosens
+a limit, never treats a PASS as the user's yes, and never claims to watch a
+live exchange surveillance feed.
 
 ## Safety
 
-- Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Education and tooling, not financial advice. A PASS is a rules check,
+  not a recommendation.
+- Sandbox by default (`"mode": "sandbox"`). Going live is the user's own
+  decision: mode "live", the typed phrase GO LIVE WITH UPSTOX and a stored
+  confirmation, or the tools refuse.
+- Nothing in this pack places an order except trader-broker, and only when
+  all three hold: trader-risk passed that exact plan, the user typed an
+  explicit yes for it in the chat, and the order tool is set to "Needs
+  approval" (Customize > Connectors > tool permissions). Never set an order
+  tool to "Always allow".
+- No options, margin or leverage unless the config allows it and the user
+  confirms.
+- Upstox tokens live in environment variables (UPSTOX_ACCESS_TOKEN and
+  friends) or the local login state, never in the chat or the config file.

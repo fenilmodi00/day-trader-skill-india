@@ -1,123 +1,111 @@
 ---
 name: trader-analyst
 description: >-
-  The Earnings Analyst. Reads a company's reported numbers straight from SEC
-  EDGAR (XBRL company facts from its 10-Qs and 10-Ks, plus the latest earnings
-  8-K and its press release) and sums up what changed: revenue, gross,
-  operating and net margins, net income and diluted EPS, quarter by quarter,
-  each against the same quarter a year earlier, with the trailing twelve
-  months. Reads an earnings call transcript when you paste one. Use when the
-  user says "how did Tesla's earnings look", "analyze the earnings", "what
-  changed this quarter", "is revenue growing", "check the 10-Q", "compare
-  margins", "sum up the call", "does it report this week", or before trading
-  a stock around its earnings.
-argument-hint: "[tickers]"
+  The Earnings Analyst for Indian markets. Reads a results XBRL file you
+  supply (NSE or BSE company results, or any file in the same shape) and sums
+  up what the company actually reported: revenue, expenses, profit, EPS,
+  operating and net margins, quarter and year growth, in INR, with what is
+  missing and any conflicting duplicates called out. No network calls, no PDF
+  parsing. Use when the user says "how did the results look", "analyse the
+  quarter", "what did they report", "is revenue growing", "check the
+  numbers", or before trading a stock around its results date.
+argument-hint: "[symbol] [xbrl file]"
 ---
 
-# trader-analyst
+# Trader Analyst
 
-Earnings move stocks more than anything else on the calendar, and the press
-release is written to put the best number first. This skill reads the numbers
-the company actually filed with the SEC, lines them up quarter by quarter, and
-says plainly what changed. For a day trader it answers two questions before a
-trade: what did the last report say, and is the next one inside this trade?
+Reads the numbers a listed Indian company actually reported in its results
+XBRL, lines up the current period against the prior-year period, and says
+plainly what changed and what the file does not contain. For a day trader it
+answers two questions before a trade: how did the last reported quarter look,
+and is the next report inside this trade?
 
-Tool in this folder (standard library Python, no keys):
+The tool is `facts.py` in this folder, standard library Python only, no keys
+and no network. It reads a file you give it and prints a report.
+
+## Where the file comes from
+
+- NSE: company results are filed as XBRL attachments on the exchange site.
+  From the company page open "Financial Results", pick the latest period, and
+  download the XBRL file (it usually lands as something like
+  `RELIANCE-XBRL.xml`).
+- BSE: same idea under Corporate Announcements, results filings carry the
+  XBRL instance alongside the PDF.
+- Or any results XBRL you already have: the company's own investor page, a
+  file a colleague exported, whatever. If it parses as XBRL with Indian fact
+  names, the tool reads it.
+
+There is no filing search and no download: the tool never calls the network.
+You supply the file, it reads that file, nothing else.
+
+## Running it
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/facts.py" --help
+python3 facts.py RELIANCE --xbrl RELIANCE-results.xml
+python3 facts.py RELIANCE --xbrl RELIANCE-results.xml --json
+python3 facts.py TCS --xbrl TCS-results.xml --announcement "results for the quarter ended June 30, 2026"
 ```
 
-It needs the SEC User-Agent (`sec_user_agent` in `trader/config.json`, or
-`SEC_USER_AGENT`): "Your Name you@example.com" with the user's real name and
-email. It refuses to call SEC without one.
+`--announcement` (or `--announcement-file`) is only a label for the period,
+copied into the report. Facts always come from the XBRL file; the
+announcement can never add, change, or fill in a number.
 
-## What it reads and writes
+## What the report shows
 
-- Reads `https://data.sec.gov/api/xbrl/companyfacts/CIK##########.json` (every
-  number the company has tagged in its filings), the company's submissions
-  list (for the newest 10-Q or 10-K and the newest 8-K with item 2.02,
-  "Results of Operations") and that 8-K's folder to find the press release
-  (the EX-99.1 exhibit).
-- Writes `trader/metrics.json` with `--metrics`: one row per company (TTM
-  revenue, net income and diluted EPS, the latest margins and growth), for
-  your notes or a spreadsheet. `metrics.example.json` in this folder is a
-  real run for AAPL, AXP, GOOGL, KO and BAC on 2026-10-13.
-- Earnings calls: the tool does not fetch transcripts. If the user pastes one
-  (or the company's IR page has it), read it and sum up what management said
-  changed: guidance, margins, demand, anything they declined to answer.
-- The next report date is not in SEC data. Look for it in `/trader-news`
-  headlines or on the company's investor relations page, and say where it
-  came from.
+- The period the numbers cover, in INR: revenue from operations, other
+  income, total income, each expense line, profit before tax, tax, and profit
+  for the period. Crore is the working scale: 1 crore = 10,000,000, so a
+  filed value of 2486560000000 prints as 248656.00 crore.
+- Derived, only where the inputs exist: operating profit and operating margin
+  (total income minus the four expense lines), net margin (profit over
+  revenue), and revenue and profit growth QoQ and YoY when the file carries a
+  comparable prior period. Money and percentages round to two decimals.
+- Missing: facts the file does not tag (or tags as nil) are listed as
+  missing, never zero-filled. A number that is not there is not a zero.
+- Conflicts: when the same fact appears twice for the same span with
+  different values, the disagreement is printed instead of being quietly
+  resolved. Facts are picked deterministically otherwise: longest period for
+  the latest end, most specific context next, context id as the tie-break.
 
-## The rules
+Fact names resolve by local name, so the taxonomy prefix does not matter:
+`in-ca:RevenueFromOperations`, `in-capmkt:RevenueFromOperations` and
+`in-bse-fin:OtherExpenses` all read the same way. Contexts carry the period
+(start and end, or instant), the entity identifier, and any segment members;
+dimensioned (segment) facts are parsed but never used for the company totals,
+so a single segment cannot stand in for the consolidated number. Units are
+read as INR, INR per share, or plain share counts.
 
-- **Filed numbers first.** The table comes from XBRL facts the company filed.
-  Use the press release for context (guidance, segment colour), and say which
-  numbers came from where.
-- **Compare like with like.** Growth is against the same quarter a year
-  earlier. Quarter-on-quarter changes are shown but many businesses are
-  seasonal (Apple's December quarter is always its biggest).
-- **Say what is derived.** Companies do not file a Q4 10-Q. The fourth
-  quarter is the 10-K year minus the three quarters inside it and is marked
-  "derived"; derived EPS is approximate.
-- **Say when the data lags.** SEC's facts API can trail a filing. When the
-  newest 10-Q is later than the newest quarter in the facts, the tool prints a
-  NOTE with the link: read the 10-Q itself before summarising.
-- **Flag one-offs.** When net income is above operating income, gains outside
-  the business (investment marks, tax items) are inside it. The tool says so.
-  Banks and insurers have no gross margin: blank, not zero.
+## Reading the report with the news
+
+Run `/trader-news` the same morning: a results announcement, a board meeting
+for approving results, or an ASM/GSM note changes how the market treats the
+numbers. The analyst tells you what was reported; the news tells you what the
+market is reacting to.
 
 ## Steps
 
-1. Run it for the companies in question (or the tickers on
-   `trader/watchlist.json`):
-
-   ```bash
-   python3 "${CLAUDE_SKILL_DIR}/facts.py" TSLA
-   python3 "${CLAUDE_SKILL_DIR}/facts.py" TSLA NVDA AMD --metrics trader/metrics.json
-   ```
-
-   `--quarters 8` shows two years, `--json` everything machine-readable,
-   `--cik` a company without a ticker.
-2. Open the latest earnings press release (the EX-99 link) and the 10-Q when
-   the numbers need context, and read them.
-3. Write the summary: one line on the quarter (revenue, EPS, growth), one on
-   margins, one on anything unusual (a one-off, a derived quarter, data that
-   lags), and the links. Plain words, real numbers, no adjectives the numbers
-   do not support.
-4. If the next report falls inside the planned trade (an overnight hold, or a
-   report before the open), say it before `/trader-exit` sets the stop: a stop
+1. Get the results XBRL for the stock (see above) and run the tool. Ask for
+   `--json` when another script should consume the report.
+2. Read the summary: one line on the quarter (revenue, profit, growth), one
+   on margins, one on anything unusual (a missing EPS line, a conflict, a
+   prior period the file does not carry).
+3. When the numbers need context, read the announcement or the filing PDF
+   yourself; the tool deliberately does not parse PDFs.
+4. If the next results date falls inside your planned trade (an overnight
+   hold, or a report before the open), say it before setting the stop: a stop
    does not protect against a gap, the stock can open past it.
-
-## Example: the reel's stock
-
-`facts.py TSLA` (run 2026-10-20): quarter ending 2026-06-30 (Q2 2026),
-revenue $28.24B, +25.5% against a year earlier, net income $1.11B (-4.9%),
-diluted EPS $0.32 (-3.0%); gross margin 16.8% (-4.3 points on the quarter
-before), operating margin 1.4%; last four quarters $103.6B revenue and $1.08
-EPS. The tool flags that net income is above operating income, so gains
-outside the business are inside it. Latest 10-Q filed 2026-07-23. Monday's
-headlines said Tesla reports this week, so the summary ends: "The next report
-is days away. A day trade that closes before the bell is not exposed to it;
-anything held overnight is."
-
-`facts.py AAPL` (2026-10-13): revenue $109.42B, +16.4% against a year
-earlier, diluted EPS $2.02 (+28.7%). For Coca-Cola the tool noted that SEC's
-facts stopped at 2026-04-03 while the 10-Q for 2026-07-03 was already filed,
-so the summary read that 10-Q directly.
 
 ## What it never does
 
+- Never calls the network: no filings API, no quotes, no downloads.
+- Never parses a PDF; XBRL or nothing.
+- Never invents a number: missing facts stay missing, growth without a
+  comparable prior period stays blank and says so.
 - Never says a stock is cheap, expensive, a buy or a sell. It reports what
   the company filed.
-- Never invents a number the filings do not have, or estimates a quarter it
-  cannot derive.
-- Never calls SEC without the User-Agent, and stays well under 10 requests a
-  second.
 
 ## Safety
 
-Education and tooling, not financial advice. This skill only reads filings.
-Nothing places an order except `/trader-broker`, after `/trader-risk` passes
-and the user types an explicit yes for that order.
+Education and tooling, not financial advice. This skill only reads files you
+give it. Nothing places an order except `/trader-broker`, after
+`/trader-risk` passes and the user types an explicit yes for that order.

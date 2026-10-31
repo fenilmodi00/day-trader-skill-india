@@ -1,0 +1,17 @@
+{
+  "orders": [
+    {"at": "2026-10-26T10:00:00+05:30", "date": "2026-10-26", "status": "approved",
+     "symbol": "RELIANCE", "side": "BUY", "kind": "entry", "tag": "dt-entry-orb",
+     "qty": 25, "price": 1193.6},
+    {"at": "2026-10-26T10:05:00+05:30", "date": "2026-10-26", "status": "filled",
+     "symbol": "RELIANCE", "side": "SELL", "kind": "exit", "tag": "dt-stop-orb",
+     "qty": 25, "price": 1183.65, "pnl": -273.63},
+    {"at": "2026-10-25T10:00:00+05:30", "date": "2026-10-25", "status": "approved",
+     "symbol": "TCS", "side": "BUY", "kind": "entry", "tag": "dt-entry-old",
+     "qty": 10, "price": 3100.0}
+  ],
+  "trades": [
+    {"at": "2026-10-26T10:05:00+05:30", "date": "2026-10-26", "symbol": "RELIANCE",
+     "side": "SELL", "qty": 25, "price": 1183.65, "pnl": -273.63}
+  ]
+}

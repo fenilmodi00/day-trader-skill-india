@@ -1,36 +1,47 @@
 #!/usr/bin/env python3
-"""Order tickets and the decision log for trader-broker. Standard library only.
+"""Order tickets and the three gates for trader-broker. Standard library only.
 
-This tool never talks to a broker and never places anything. It does its
-work around the one moment that matters, your yes:
+Upstox is the only broker and sandbox is the default. No order goes out
+unless all three gates hold, enforced here in code:
 
-  show      renders each proposed order as a plain-English ticket plus the
-            exact JSON Claude will send to Alpaca's place_stock_order tool.
-            A bracket order shows its stop-loss, take-profit and the max loss
-            at the stop. An order is READY only if trader-risk passed THIS
-            exact order today (matched by fingerprint) and nobody has decided
-            on it yet.
-  approve   records your explicit yes for ONE order, with your reply word for
-            word. It refuses "yes to all", "sure", "ok", a yes that names a
-            different stock or amount, and any order that is not READY.
-  decline   records a no.
-  result    records what happened after the Allow once / Deny card:
-            placed (with the broker's order id), denied, or failed.
-  fill      records a fill in trader/portfolio.json (cash and shares).
-  flatten   builds a sell ticket that closes a symbol's open position by
-            flat_by. It still goes through trader-risk and your yes.
-  log       prints today's decisions.
+  gate 1, risk    the exact order has a fresh PASS from trader-risk check.py
+                  for today, matched by order hash (symbol, instrument_key,
+                  side, quantity, entry, stop, target, tag). Edit anything and
+                  the old PASS and the old approval are both void.
+  gate 2, you     your typed yes, recorded word for word by approve, bound to
+                  the same order hash. No approval, no execute.
+  gate 3, host    the host tool card (Allow once / Deny) Claude shows before
+                  the execute call. Documented, never automated here.
 
-    python3 ticket.py show                    # every order, READY or not
-    python3 ticket.py show --index 1 --json   # one ticket as JSON
-    python3 ticket.py approve --index 1 --reply "yes"
-    python3 ticket.py result --index 1 --status placed --broker-id 61e6...
-    python3 ticket.py fill --symbol TSLA --side buy --qty 8 --price 364.20
-    python3 ticket.py flatten --symbol TSLA --qty 8
+  show      render the ticket from trader/plan.json plus the exact Upstox v3
+            payload that will be sent. --json prints it as JSON.
+  approve   record the user's explicit yes for this one order (the reply word
+            for word) and write the ticket with the payload. Refuses ok, sure,
+            a batch yes, a doubtful yes, and anything without a fresh PASS.
+  execute   place the approved order through the trader_core broker seam.
+            Sandbox host by default; live needs the stored confirmation from
+            trader_core.config.confirm_live. Records order id, status, fills
+            and positions on the ticket and in trader/state/orders.json.
+  result    read the order book, the trades and the positions through the
+            same seam and update the ticket; a completed exit records its P&L.
+  fill      record a fill by hand (same ledger), with an optional pnl.
+  flatten   prepare the opposite MARKET order (with market_protection) that
+            closes the plan's position by flat_by. It obeys the same three
+            gates: risk PASS for the flatten order, then your typed yes.
+  log       print today's decisions and fills from the ledger.
+
+    python3 ticket.py show
+    python3 ticket.py show --flatten --json
+    python3 ticket.py approve --yes "yes, buy 25 RELIANCE"
+    python3 ticket.py execute
+    python3 ticket.py result
+    python3 ticket.py flatten
     python3 ticket.py log
 
-Everything is written to trader/state/broker.json (append only). Dates are
-New York dates; --now "2026-10-19 10:15" pins the clock.
+The ticket lives at trader/ticket.json (or --ticket PATH). The ledger lives
+in trader/state/orders.json, the same file trader-risk reads. Dates are IST
+dates; --now "2026-10-26 10:00" pins the clock. Education and tooling, not
+financial advice.
 """
 
 import argparse
@@ -41,73 +52,32 @@ import os
 import re
 import sys
 
-ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "limit_price",
-                 "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
-                 "order_class", "take_profit_limit_price", "stop_loss_stop_price",
-                 "stop_loss_limit_price", "advanced_instructions")
-STRING_FIELDS = ("qty", "notional", "limit_price", "stop_price", "trail_price", "trail_percent",
-                 "take_profit_limit_price", "stop_loss_stop_price", "stop_loss_limit_price")
-TIF_WORDS = {"day": "good for today", "gtc": "good until canceled", "opg": "at the open",
-             "cls": "at the close", "ioc": "immediate or cancel", "fok": "fill or kill"}
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from trader_core import config, orders  # noqa: E402
+from trader_core.broker import UpstoxBroker  # noqa: E402
+from trader_core.http import LIVE, SANDBOX, UpstoxAuthError, UpstoxError  # noqa: E402
+from trader_core.timeutil import now_ist, parse_ist  # noqa: E402
+
+SKILL = "ticket.py"
+PLAN_PATH = "trader/plan.json"
+TICKET_PATH = "trader/ticket.json"
+RISK_PATH = "trader/state/risk.json"
 YES_WORDS = ("yes", "y")
 BATCH_WORDS = {"all", "every", "everything", "rest", "remaining", "them", "both", "batch", "each"}
 DOUBT_WORDS = {"no", "not", "dont", "don't", "wait", "cancel", "stop", "but", "maybe", "later",
                "hold", "unless", "if"}
+# The order fields the hash binds: any edit here voids the PASS and the approval.
+TICKET_FIELDS = ("symbol", "instrument_key", "side", "quantity", "entry", "stop", "target", "tag",
+                 "product", "validity", "order_type", "price", "trigger_price", "market_protection",
+                 "date")
+FLAT_PROTECTION = 10  # percent of market protection on the flatten MARKET order
 
 
 class TicketError(Exception):
     pass
-
-
-# ---------------------------------------------------------------- time (New York, no tz files)
-
-def _nth_sunday(year, month, n):
-    d = datetime.date(year, month, 1)
-    d += datetime.timedelta(days=(6 - d.weekday()) % 7)
-    return d + datetime.timedelta(weeks=n - 1)
-
-
-def eastern_offset(utc):
-    """Hours from UTC for New York: -4 in daylight time, -5 otherwise.
-    DST runs from 2:00 a.m. on the second Sunday of March to 2:00 a.m. on the
-    first Sunday of November (US rule since 2007)."""
-    y = utc.year
-    start = datetime.datetime.combine(_nth_sunday(y, 3, 2), datetime.time(7, 0))   # 2:00 EST
-    end = datetime.datetime.combine(_nth_sunday(y, 11, 1), datetime.time(6, 0))    # 2:00 EDT
-    naive = utc.replace(tzinfo=None)
-    return -4 if start <= naive < end else -5
-
-
-def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
-
-
-def eastern_to_utc(local):
-    for off in (-4, -5):
-        utc = local - datetime.timedelta(hours=off)
-        if eastern_offset(utc) == off:
-            return utc
-    return local + datetime.timedelta(hours=5)
-
-
-def parse_now(text):
-    """ISO time -> naive UTC. A time without an offset is taken as New York time."""
-    if not text:
-        return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
-    t = text.strip().replace("Z", "+00:00")
-    try:
-        dt = datetime.datetime.fromisoformat(t)
-    except ValueError:
-        raise TicketError("--now wants a time like \"2026-10-19 10:15\" (New York) or ...Z (UTC)")
-    if dt.tzinfo is None:
-        return eastern_to_utc(dt)
-    return (dt - dt.utcoffset()).replace(tzinfo=None)
-
-
-def ny_iso(now_utc):
-    """naive UTC -> "2026-10-19T10:15:00-04:00" (New York wall clock with its offset)."""
-    off = eastern_offset(now_utc)
-    return "%s%+03d:00" % (to_eastern(now_utc).replace(microsecond=0).isoformat(), off)
 
 
 # ---------------------------------------------------------------- files
@@ -120,7 +90,7 @@ def read_json(path, what, required=True):
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
-    except json.JSONDecodeError as e:
+    except (OSError, ValueError) as e:
         raise TicketError("%s is not valid JSON: %s" % (path, e))
 
 
@@ -135,141 +105,139 @@ def write_json(path, data):
     os.replace(tmp, path)
 
 
-def rec_day(rec):
-    """The trading day a decision belongs to: its "date" (the day it was made under), else the day of "at"."""
-    return str(rec.get("date") or str(rec.get("at", ""))[:10])
+def _rows(answer):
+    """Order book, trades or positions from the seam: a list, or an envelope
+    with a data list."""
+    if isinstance(answer, list):
+        return answer
+    if isinstance(answer, dict) and isinstance(answer.get("data"), list):
+        return answer["data"]
+    return []
 
 
-# ---------------------------------------------------------------- the order
+# ---------------------------------------------------------------- the order and its hash
 
-def fingerprint(order):
-    """Same function as trader-risk/check.py: identifies the exact order."""
-    core = {k: order[k] for k in ALPACA_FIELDS if k in order and order[k] is not None}
-    blob = json.dumps(core, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
-
-
-def _str_num(v):
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        f = float(v)
-        return str(int(f)) if f == int(f) else repr(f)
-    return str(v)
+def _legs_by_role(plan):
+    by = {}
+    for leg in (plan or {}).get("legs") or []:
+        if isinstance(leg, dict) and leg.get("role"):
+            by.setdefault(leg["role"], leg)
+    missing = [r for r in ("entry", "stop", "target") if r not in by]
+    if missing:
+        raise TicketError("the plan has no %s leg: trader-risk checks a two-leg plan, "
+                          "so run trader-budget first" % ", ".join(missing))
+    return by
 
 
-def _f(x):
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return None
+def _leg_price(leg):
+    """The price a leg acts at: the trigger for a stop leg, else the limit."""
+    if leg.get("trigger_price") is not None:
+        return leg["trigger_price"]
+    return leg.get("price")
 
 
-def tool_input(order):
-    """The exact arguments for place_stock_order: Alpaca's parameter names,
-    numbers as strings (its signature types qty, notional and prices as str).
-    "why" and "plan" are ours and are never sent."""
+def entry_order(plan):
+    """The entry order the plan's entry leg places, as the gates bind it."""
+    legs = _legs_by_role(plan)
+    entry = legs["entry"]
+    qty = entry.get("quantity", plan.get("quantity"))
+    return {"kind": "entry", "symbol": plan.get("symbol"),
+            "instrument_key": entry.get("instrument_token") or plan.get("instrument_key"),
+            "side": entry.get("transaction_type", "BUY"), "quantity": qty,
+            "product": plan.get("product", "I"), "order_type": entry.get("order_type", "LIMIT"),
+            "price": entry.get("price"), "trigger_price": entry.get("trigger_price"),
+            "validity": entry.get("validity", "DAY"), "tag": entry.get("tag"),
+            "entry": _leg_price(entry), "stop": _leg_price(legs["stop"]),
+            "target": _leg_price(legs["target"]), "date": plan.get("date"),
+            "flat_by": plan.get("flat_by")}
+
+
+def flatten_order(plan, cfg=None, qty=None):
+    """The opposite MARKET order that closes the plan's position, with
+    market_protection set. The stop and target stay on the ticket for the
+    record; the flatten order itself is one MARKET leg."""
+    legs = _legs_by_role(plan)
+    entry = legs["entry"]
+    sym = str(plan.get("symbol") or "").upper()
+    side = "SELL" if str(entry.get("transaction_type", "BUY")).upper() == "BUY" else "BUY"
+    flat_by = plan.get("flat_by")
+    if not flat_by and cfg is not None:
+        flat_by = config.session_times(cfg)["flat_by"].strftime("%H:%M")
+    return {"kind": "flatten", "symbol": plan.get("symbol"),
+            "instrument_key": entry.get("instrument_token") or plan.get("instrument_key"),
+            "side": side, "quantity": qty if qty is not None else entry.get("quantity",
+                                                                            plan.get("quantity")),
+            "product": plan.get("product", "I"), "order_type": "MARKET", "price": None,
+            "trigger_price": None, "validity": "DAY",
+            "market_protection": FLAT_PROTECTION, "tag": "dt-flat-" + sym.lower(),
+            "entry": _leg_price(entry), "stop": _leg_price(legs["stop"]),
+            "target": _leg_price(legs["target"]), "date": plan.get("date"), "flat_by": flat_by}
+
+
+def order_core(o):
     out = {}
-    for k in ALPACA_FIELDS:
-        if k in order and order[k] is not None:
-            out[k] = _str_num(order[k]) if k in STRING_FIELDS else order[k]
+    for k in TICKET_FIELDS:
+        if o.get(k) is not None:
+            out[k] = o[k]
     return out
 
 
+def order_hash(o):
+    """The exact order as one hash: the same number trader-risk's PASS is
+    bound to. An edited quantity or price changes it and voids everything."""
+    blob = json.dumps(order_core(o), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def payload_for(o):
+    """The exact Upstox v3 place body for a ticket order, built and validated
+    by trader_core.orders.leg. Shown and sent are the same dict."""
+    return orders.leg(o.get("instrument_key"), o.get("side"), int(o.get("quantity")),
+                      o.get("order_type", "LIMIT"), product=o.get("product", "I"),
+                      price=o.get("price"), trigger_price=o.get("trigger_price"),
+                      market_protection=o.get("market_protection") or 0, tag=o.get("tag"),
+                      validity=o.get("validity", "DAY"))
+
+
 def _money(v):
-    f = float(v)
-    s = "{:,.2f}".format(f)
-    return "$" + (s[:-3] if s.endswith(".00") else s)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "%s" % (v,)
+    return "Rs " + "{:,.2f}".format(f)
 
 
-def _p(v):
-    return "%.2f" % float(v)
+def plain(o):
+    """The ticket in plain words."""
+    parts = ["%s %s %s" % (o.get("side"), o.get("quantity"), o.get("symbol"))]
+    ot = str(o.get("order_type", "LIMIT")).upper()
+    if ot == "MARKET":
+        parts.append("market order, %s%% market protection" % (o.get("market_protection") or 0))
+    elif o.get("price") is not None:
+        parts.append("limit %s" % _money(o["price"]))
+    elif o.get("trigger_price") is not None:
+        parts.append("stop, trigger %s" % _money(o["trigger_price"]))
+    parts.append("product %s" % o.get("product", "I"))
+    if o.get("kind") != "flatten":
+        parts.append("stop %s" % _money(o.get("stop")))
+        parts.append("target %s" % _money(o.get("target")))
+    return ", ".join(parts)
 
 
-def is_bracket(order):
-    oc = str(order.get("order_class") or "").lower()
-    legs = order.get("take_profit_limit_price") is not None or order.get("stop_loss_stop_price") is not None
-    return oc == "bracket" or (not oc and legs)
-
-
-def max_loss(order):
-    """(dollars, stop) lost if the stop fills exactly at the stop, or (None, stop)."""
-    stop = _f(order.get("stop_loss_stop_price")) or _f((order.get("plan") or {}).get("stop"))
-    q = _f(order.get("qty"))
-    if not stop or not q:
-        return None, stop
-    plan = order.get("plan") or {}
-    if str(order.get("type", "market")) == "limit" and _f(order.get("limit_price")):
-        entry = _f(order["limit_price"])
-    elif _f(plan.get("max_loss")) is not None:
-        return round(_f(plan["max_loss"]), 2), stop
-    else:
-        entry = _f(plan.get("entry"))
-    if not entry:
-        return None, stop
-    risk = abs(entry - stop)
-    return round(q * int(round(risk * 100)) / 100.0, 2), stop
-
-
-def plain_parts(order):
-    """The ticket in plain words, one part per line."""
-    side = str(order.get("side", "")).upper()
-    sym = order.get("symbol", "?")
-    typ = str(order.get("type", "market"))
-    tif = TIF_WORDS.get(str(order.get("time_in_force", "day")), order.get("time_in_force"))
-    if is_bracket(order):
-        how = "limit %s" % _p(order["limit_price"]) if typ == "limit" and order.get("limit_price") else typ
-        parts = ["%s %s %s, %s, %s" % (side, _str_num(order.get("qty")), sym, how, tif)]
-        if order.get("stop_loss_stop_price") is not None:
-            leg = "stop-loss %s" % _p(order["stop_loss_stop_price"])
-            if order.get("stop_loss_limit_price") is not None:
-                leg += " (limit %s)" % _p(order["stop_loss_limit_price"])
-            parts.append(leg)
-        if order.get("take_profit_limit_price") is not None:
-            parts.append("take-profit %s" % _p(order["take_profit_limit_price"]))
-        loss, stop = max_loss(order)
-        if loss is not None:
-            parts.append("max loss about %s if the stop fills at %s (it can fill worse in a fast market)"
-                         % (_money(loss), _p(stop)))
-        return parts
-    if order.get("notional") is not None:
-        what = "%s of %s" % (_money(order["notional"]), sym)
-    else:
-        q = _str_num(order.get("qty"))
-        what = "%s share%s of %s" % (q, "" if q == "1" else "s", sym)
-    if typ == "limit":
-        how = "limit order at %s" % _money(order.get("limit_price"))
-    elif typ == "stop":
-        how = "stop order at %s" % _money(order.get("stop_price"))
-    elif typ == "stop_limit":
-        how = "stop %s, limit %s" % (_money(order.get("stop_price")), _money(order.get("limit_price")))
-    else:
-        how = "%s order" % typ.replace("_", " ")
-    return ["%s %s, %s, %s" % (side, what, how, tif)]
-
-
-def plain(order):
-    """BUY $1,250 of AAPL, market order, good for today
-    BUY 8 TSLA, market, good for today / stop-loss 358.32 / take-profit 370.04 / max loss about $46.88 ..."""
-    return " / ".join(plain_parts(order))
-
-
-def amount_numbers(order):
+def amount_numbers(o):
     nums = []
-    for k in ("notional", "qty", "limit_price", "stop_loss_stop_price", "take_profit_limit_price",
-              "stop_loss_limit_price"):
-        if order.get(k) is not None:
-            v = _f(order[k])
-            if v is not None:
-                nums.append(v)
-    loss, _ = max_loss(order)
-    if loss is not None:
-        nums.append(loss)
+    for k in ("quantity", "price", "entry", "stop", "target", "trigger_price"):
+        try:
+            nums.append(float(o[k]))
+        except (TypeError, ValueError, KeyError):
+            pass
     return nums
 
 
-def parse_yes(reply, order, batch_symbols=()):
-    """Is this reply an explicit yes for THIS one order? Returns (ok, why)."""
+def parse_yes(reply, order):
+    """Is this reply an explicit yes for THIS one order? Returns (ok, why).
+    The user's chat reply is recorded word for word; ok, sure, a batch yes and
+    a doubtful yes all count as no."""
     raw = (reply or "").strip()
     if not raw:
         return False, "the reply is empty"
@@ -279,441 +247,436 @@ def parse_yes(reply, order, batch_symbols=()):
     if not words or words[0] not in YES_WORDS:
         return False, "only a reply that starts with \"yes\" counts (not ok, sure, go, do it)"
     if BATCH_WORDS & set(words):
-        return False, "a yes covers one order at a time, not a batch"
+        return False, "a yes covers one order at a time, never a batch"
     if DOUBT_WORDS & set(words[1:]):
         return False, "the reply has a condition or a doubt in it; ask again"
-    sym = str(order.get("symbol", "")).upper()
-    tokens = set(re.findall(r"[A-Z][A-Z.\-]{0,6}", raw.upper()))
-    others = {s.upper() for s in batch_symbols} - {sym}
-    named = tokens & others
-    if named:
-        return False, "the reply names %s, but this order is for %s" % (", ".join(sorted(named)), sym)
     nums = [float(n.replace(",", "")) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", raw)]
     if nums:
         want = amount_numbers(order)
         if not any(abs(n - w) < 0.005 for n in nums for w in want):
             return False, "the reply says %s, but this order is %s" % (
-                ", ".join(_str_num(n) for n in nums), plain(order))
+                ", ".join("%g" % n for n in nums), plain(order))
     return True, "explicit yes for %s" % plain(order)
 
 
-# ---------------------------------------------------------------- state
+# ---------------------------------------------------------------- gates
 
-def load_state(path):
-    return read_json(path, "broker state", required=False) or {"orders": []}
-
-
-def latest(state, fp, today):
-    """The latest decision recorded today for this fingerprint, or None."""
-    found = None
-    for rec in state.get("orders", []):
-        if rec.get("fingerprint") == fp and rec_day(rec) == today:
-            found = rec
-    return found
+def load_plan(path, symbol=None):
+    plan = read_json(path, "plan (run trader-budget, then trader-risk check.py, first)")
+    if symbol and str(plan.get("symbol", "")).upper() != symbol.upper():
+        raise TicketError("the plan at %s is for %s, not %s" % (path, plan.get("symbol"), symbol))
+    return plan
 
 
-def risk_verdict(risk, fp, today):
-    if not risk:
-        return None, "trader-risk has not checked these orders (run check.py)"
-    if risk.get("date") != today:
-        return None, "the risk check is from %s, not today; run check.py again" % risk.get("date")
-    for r in risk.get("results", []):
-        if r.get("fingerprint") == fp:
-            return r, None
-    return None, "this exact order was not in the last risk check (it changed or is new); run check.py again"
+def risk_record(risk, today):
+    """The verdict as the gates read it: today's only, with the plan attached."""
+    if not isinstance(risk, dict) or risk.get("verdict") not in ("PASS", "BLOCK"):
+        return None
+    day = str(risk.get("now", ""))[:10] or str(risk.get("generated_at", ""))[:10]
+    if day != today:
+        return None
+    plan = risk.get("plan")
+    if not isinstance(plan, dict) or not plan:
+        return None
+    return {"verdict": risk["verdict"], "reasons": risk.get("reasons") or [], "plan": plan}
 
 
-def status_of(order, risk, state, today):
-    """(ready, label, risk_result)"""
-    fp = fingerprint(order)
-    rv, why = risk_verdict(risk, fp, today)
-    if rv is None:
-        return False, "NOT READY: " + why, None
-    if rv.get("verdict") != "PASS":
-        return False, "BLOCKED by trader-risk: " + "; ".join(rv.get("reasons", [])), rv
-    rec = latest(state, fp, today)
-    if rec:
-        st = rec.get("status")
-        if st == "approved":
-            return False, "APPROVED by you at %s, waiting for the place_stock_order call" % rec.get("at"), rv
-        return False, "DONE: %s at %s" % (st, rec.get("at")), rv
-    return True, "READY: trader-risk PASS, waiting for your yes", rv
+def order_from_plan(plan, kind):
+    return flatten_order(plan) if kind == "flatten" else entry_order(plan)
 
 
-def kind_of(order, rv):
-    """entry or exit, as trader-risk saw it (older checks: a buy is an entry)."""
-    if rv and rv.get("kind"):
-        return rv["kind"]
-    return "entry" if str(order.get("side", "")).lower() == "buy" else "exit"
+def risk_gate(o, risk, today):
+    """Gate 1: a fresh trader-risk PASS for this exact order. Raises."""
+    rec = risk_record(risk, today)
+    if rec is None:
+        raise TicketError("gate 1 (risk): no trader-risk PASS for today (%s); run "
+                          "trader-risk check.py for this exact order first" % today)
+    if rec["verdict"] != "PASS":
+        raise TicketError("gate 1 (risk): trader-risk BLOCKED this plan: %s"
+                          % "; ".join(rec["reasons"][:3]))
+    if order_hash(order_from_plan(rec["plan"], o.get("kind"))) != order_hash(o):
+        raise TicketError("gate 1 (risk): the PASS on file is for a different order (the plan "
+                          "changed since the check); run trader-risk check.py again")
+    return rec
 
 
-# ---------------------------------------------------------------- rendering
+def approval_gate(o, ticket, today):
+    """Gate 2: your typed yes, recorded today, bound to this order hash. Raises."""
+    rec = ticket.get("approval")
+    if not isinstance(rec, dict) or rec.get("date") != today:
+        raise TicketError("gate 2 (approval): no typed yes recorded today; run approve --yes first, "
+                          "then execute")
+    if rec.get("order_hash") != order_hash(o):
+        raise TicketError("gate 2 (approval): the yes on record is for a different order (the "
+                          "order changed since you approved); approve again")
+    return rec
 
-def render(order, idx, total, cfg, risk, state, today):
-    ready, label, rv = status_of(order, risk, state, today)
-    broker = str(cfg.get("broker", "alpaca")).lower()
-    paper = cfg.get("paper", True)
-    acct = "PAPER account" if paper else "LIVE ACCOUNT, REAL MONEY"
-    lines = ["ORDER %d of %d, %s, %s" % (idx, total, acct, "Interactive Brokers" if broker == "ibkr" else "Alpaca")]
-    for part in plain_parts(order):
-        lines.append("  " + part)
-    if order.get("why"):
-        lines.append("  why: " + order["why"])
-    lines.append("  " + label)
-    for w in (rv or {}).get("warnings", []):
-        lines.append("  note: " + w)
-    if broker == "ibkr":
-        lines.append("  Claude drafts this with the Interactive Brokers connector. IBKR sends it to your")
-        lines.append("  IBKR account, and it only goes to the market after you approve it there.")
+
+# ---------------------------------------------------------------- ticket and ledger
+
+def _read_ticket(path):
+    doc = read_json(path, "ticket", required=False)
+    return doc if isinstance(doc, dict) else {}
+
+
+def ticket_view(o, ticket, risk, today):
+    """(ready, status, risk note) for show, without raising: a BLOCK is shown,
+    not hidden."""
+    fp = order_hash(o)
+    view_kind = o.get("kind")
+    rec = risk_record(risk, today)
+    if rec is None:
+        ready, status = False, "NOT READY: no fresh trader-risk PASS for today; run check.py"
+    elif rec["verdict"] != "PASS":
+        ready = False
+        status = "BLOCKED by trader-risk: " + "; ".join(rec["reasons"][:3])
     else:
-        lines.append("  Claude will call place_stock_order with exactly:")
-        for l in json.dumps(tool_input(order), indent=2).splitlines():
-            lines.append("    " + l)
-        if is_bracket(order):
-            lines.append("  Alpaca places the entry, then the stop-loss and the take-profit as two orders")
-            lines.append("  that cancel each other: when one fills, the other is canceled.")
-    if ready:
-        lines.append("  Reply \"yes\" to place this one order, or \"no\" to skip it.")
-        if broker != "ibkr":
-            lines.append("  Claude's own card then asks again: Allow once places it, Deny stops it.")
-    return "\n".join(lines), ready
+        if order_hash(order_from_plan(rec["plan"], view_kind)) != fp:
+            ready, status = False, ("NOT READY: the PASS is for a different order (the plan changed); "
+                                    "run check.py again")
+        else:
+            ready, status = True, "READY: trader-risk PASS, waiting for your typed yes"
+    appr = ticket.get("approval")
+    if isinstance(appr, dict) and appr.get("order_hash") == fp:
+        ready = False
+        if ticket.get("status") in ("placed", "filled"):
+            res = ticket.get("result") or {}
+            status = "PLACED: order id %s, use result to follow it" % res.get("order_id")
+        else:
+            status = "APPROVED by you at %s, waiting for execute" % appr.get("at")
+    return {"kind": o.get("kind"), "symbol": o.get("symbol"), "date": o.get("date"),
+            "order": o, "order_hash": fp, "plain": plain(o), "payload": payload_for(o),
+            "ready": ready, "status": status}
 
 
-def ticket_json(order, idx, cfg, risk, state, today):
-    ready, label, rv = status_of(order, risk, state, today)
-    loss, stop = max_loss(order)
-    return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
-            "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
-            "broker": cfg.get("broker", "alpaca"), "tool": "place_stock_order",
-            "tool_input": tool_input(order), "why": order.get("why", ""),
-            "bracket": is_bracket(order), "max_loss": loss, "stop": stop}
+def _ledger_add(cfg, key, rec):
+    state = config.state_read(cfg, "orders.json", {}) or {}
+    state.setdefault(key, []).append(rec)
+    config.state_write(cfg, "orders.json", state)
 
 
-# ---------------------------------------------------------------- fills -> portfolio
+# ---------------------------------------------------------------- clock
 
-def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date):
-    """Record a filled order in trader/portfolio.json: cash and shares, with a
-    cost-basis lot per buy (oldest lots are relieved first on a sell)."""
-    pf = read_json(portfolio_path, "portfolio", required=False)
-    if pf is None:
-        budget = cfg.get("budget")
-        if not budget:
-            raise TicketError("no %s yet and no budget in the config to start it from" % portfolio_path)
-        pf = {"cash": float(budget), "positions": []}
-    symbol = symbol.upper()
-    qty, price = float(qty), float(price)
-    if qty <= 0 or price <= 0:
-        raise TicketError("a fill needs a positive qty and price")
-    cost = round(qty * price, 2)
-    pos = None
-    for p in pf.setdefault("positions", []):
-        if str(p.get("ticker", "")).upper() == symbol:
-            pos = p
-    if side == "buy":
-        if pos is None:
-            pos = {"ticker": symbol, "shares": 0.0, "lots": []}
-            pf["positions"].append(pos)
-        lots = pos.setdefault("lots", [])
-        lots.append({"id": "%s-%d" % (symbol, len(lots) + 1), "date": date, "shares": qty, "cost": cost})
-        pos["shares"] = round(float(pos.get("shares", 0)) + qty, 6)
-        pf["cash"] = round(float(pf.get("cash", 0)) - cost, 2)
-    else:
-        if pos is None or float(pos.get("shares", 0)) + 1e-9 < qty:
-            raise TicketError("cannot record selling %s %s: the portfolio holds %s"
-                              % (_str_num(qty), symbol, pos.get("shares", 0) if pos else 0))
-        left = qty
-        for lot in sorted(pos.get("lots", []), key=lambda l: l.get("date", "")):
-            if left <= 1e-9:
-                break
-            take = min(left, float(lot["shares"]))
-            per = float(lot["cost"]) / float(lot["shares"]) if float(lot["shares"]) else 0
-            lot["cost"] = round(float(lot["cost"]) - per * take, 2)
-            lot["shares"] = round(float(lot["shares"]) - take, 6)
-            left -= take
-        pos["lots"] = [l for l in pos.get("lots", []) if float(l["shares"]) > 1e-9]
-        pos["shares"] = round(float(pos["shares"]) - qty, 6)
-        if pos["shares"] <= 1e-9:
-            pf["positions"].remove(pos)
-        pf["cash"] = round(float(pf.get("cash", 0)) + cost, 2)
-    write_json(portfolio_path, pf)
-    return pf
-
-
-def log_fill(state_path, now, today, symbol, side, qty, price):
-    """A fill in the log, so trader-risk can count day trades (a buy and a sell the same day)."""
-    state = load_state(state_path)
-    state.setdefault("orders", []).append({
-        "at": ny_iso(now), "date": today, "status": "filled", "symbol": symbol.upper(), "side": side,
-        "qty": _str_num(float(qty)), "price": float(price),
-        "plain": "%s %s %s at %s" % (side.upper(), _str_num(float(qty)), symbol.upper(), _p(price))})
-    write_json(state_path, state)
+def _clock(a):
+    try:
+        now = parse_ist(a.now) if getattr(a, "now", None) else now_ist()
+    except ValueError as e:
+        raise TicketError("--now wants an IST time like \"2026-10-26 10:00\": %s" % e)
+    today = getattr(a, "today", None) or now.date().isoformat()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", today):
+        raise TicketError("--today wants a date like 2026-10-26")
+    return now, today
 
 
 # ---------------------------------------------------------------- commands
 
-def _clock(a):
-    now = parse_now(getattr(a, "now", None))
-    today = getattr(a, "today", None) or to_eastern(now).date().isoformat()
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", today):
-        raise TicketError("--today wants a date like 2026-10-19")
-    return now, today
-
-
-def _load(a):
-    doc = read_json(a.orders, "orders file (run trader-budget, or ticket.py flatten, first)")
-    orders = doc.get("orders", doc) if isinstance(doc, dict) else doc
-    if not isinstance(orders, list) or not orders:
-        raise TicketError("no orders in %s" % a.orders)
-    cfg = read_json(a.config, "config", required=False) or {}
-    risk = read_json(a.risk, "risk check", required=False)
-    state = load_state(a.state)
-    now, today = _clock(a)
-    return orders, cfg, risk, state, today, now
-
-
-def _pick(orders, index):
-    if index is None:
-        raise TicketError("say which order: --index N")
-    if not 1 <= index <= len(orders):
-        raise TicketError("there is no order %d (there are %d)" % (index, len(orders)))
-    return orders[index - 1]
-
-
-def cmd_show(a):
-    orders, cfg, risk, state, today, now = _load(a)
-    picks = [(a.index, _pick(orders, a.index))] if a.index else list(enumerate(orders, 1))
+def cmd_show(a, source=None):
+    cfg = config.load(a.config)
+    _, today = _clock(a)
+    plan = load_plan(a.plan, a.symbol)
+    flatten_mode = bool(a.flatten) or (_read_ticket(a.ticket).get("kind") == "flatten")
+    o = flatten_order(plan) if flatten_mode else entry_order(plan)
+    view = ticket_view(o, _read_ticket(a.ticket), read_json(a.risk, "risk verdict",
+                                                            required=False), today)
     if a.json:
-        out = [ticket_json(o, i, cfg, risk, state, today) for i, o in picks]
-        print(json.dumps(out[0] if a.index else out, indent=2))
-        return 0 if any(t["ready"] for t in out) else 1
-    blocks, any_ready = [], False
-    for i, o in picks:
-        text, ready = render(o, i, len(orders), cfg, risk, state, today)
-        blocks.append(text)
-        any_ready = any_ready or ready
-    print("\n\n".join(blocks))
-    print("\nOne order at a time: a yes covers one ticket, never the batch. Education and tooling, "
-          "not financial advice.")
-    return 0 if any_ready else 1
+        print(json.dumps(view, indent=2))
+        return 0 if view["ready"] else 1
+    mode = config.mode(cfg)
+    label = "SANDBOX, no real money" if mode == "sandbox" else "LIVE, REAL MONEY"
+    lines = ["TICKET for %s, %s, %s: %s" % (view["symbol"], view["kind"], label, view["plain"])]
+    lines.append("  order hash %s: every gate binds this exact order; edit anything and the "
+                 "PASS and the approval are void" % view["order_hash"])
+    lines.append("  " + view["status"])
+    lines.append("  gate 3, host tool: Claude shows an Allow once / Deny card before the execute "
+                 "call; that card is the host approval and is never automated here")
+    lines.append("  Upstox will receive exactly:")
+    lines.extend("    " + l for l in json.dumps(view["payload"], indent=2).splitlines())
+    if view["ready"]:
+        lines.append("  Your move: record your yes with approve --yes \"your reply word for word\"")
+    print("\n".join(lines))
+    print("One ticket at a time. Education and tooling, not financial advice.")
+    return 0 if view["ready"] else 1
 
 
-def cmd_approve(a):
-    orders, cfg, risk, state, today, now = _load(a)
-    order = _pick(orders, a.index)
-    ready, label, rv = status_of(order, risk, state, today)
-    if not ready:
-        raise TicketError("order %d is not ready: %s" % (a.index, label))
-    ok, why = parse_yes(a.reply, order, [o.get("symbol", "") for o in orders])
+def cmd_approve(a, source=None):
+    cfg = config.load(a.config)
+    now, today = _clock(a)
+    plan = load_plan(a.plan, a.symbol)
+    flatten_mode = bool(a.flatten) or (_read_ticket(a.ticket).get("kind") == "flatten")
+    o = flatten_order(plan, cfg) if flatten_mode else entry_order(plan)
+    risk_gate(o, read_json(a.risk, "risk verdict", required=False), today)
+    ok, why = parse_yes(a.yes, o)
     if not ok:
-        print("Not recorded: %s. Ask the user again with the ticket for order %d." % (why, a.index))
-        return 1
-    loss, stop = max_loss(order)
-    rec = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fingerprint(order),
-           "symbol": str(order.get("symbol", "")).upper(), "side": order.get("side"),
-           "qty": order.get("qty"), "kind": kind_of(order, rv), "max_loss": loss, "stop": stop,
-           "plain": plain(order), "status": "approved", "reply": a.reply,
-           "paper": bool(cfg.get("paper", True)), "broker": cfg.get("broker", "alpaca")}
-    state.setdefault("orders", []).append(rec)
-    write_json(a.state, state)
-    print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
-    if str(cfg.get("broker", "alpaca")).lower() == "ibkr":
-        print("Now draft it with the Interactive Brokers connector; approve it in your IBKR account.")
-    else:
-        print("Now call place_stock_order with exactly:")
-        print(json.dumps(tool_input(order), indent=2))
-        print("Claude's card shows Allow once / Deny. Then: ticket.py result --index %d --status "
-              "placed|denied|failed" % a.index)
+        print("%s: not recorded: %s. Show the ticket and ask again." % (SKILL, why), file=sys.stderr)
+        return 2
+    fp = order_hash(o)
+    payload = payload_for(o)
+    ticket = {"kind": o.get("kind"), "symbol": o.get("symbol"), "date": today, "order": o,
+              "order_hash": fp, "plain": plain(o), "payload": payload, "status": "approved",
+              "approval": {"at": now.isoformat(), "date": today, "reply": a.yes.strip(),
+                           "order_hash": fp, "risk": "PASS", "mode": config.mode(cfg)},
+              "result": None}
+    write_json(a.ticket, ticket)
+    _ledger_add(cfg, "orders", {"at": now.isoformat(), "date": today, "status": "approved",
+                                "kind": o.get("kind"), "symbol": o.get("symbol"),
+                                "side": o.get("side"), "quantity": o.get("quantity"),
+                                "tag": o.get("tag"), "order_hash": fp})
+    print("Recorded your yes for this exact order (hash %s): %s" % (fp, plain(o)))
+    print("Upstox will receive exactly this payload when you execute:")
+    print(json.dumps(payload, indent=2))
+    print("Gate 3, host tool: the Allow once / Deny card Claude shows before the call.")
+    print("Now: python3 ticket.py execute --ticket %s" % a.ticket)
     return 0
 
 
-def cmd_decline(a):
-    orders, cfg, risk, state, today, now = _load(a)
-    order = _pick(orders, a.index)
-    rec = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fingerprint(order),
-           "symbol": str(order.get("symbol", "")).upper(), "side": order.get("side"),
-           "plain": plain(order), "status": "declined", "reply": a.reply or "no"}
-    state.setdefault("orders", []).append(rec)
-    write_json(a.state, state)
-    print("Recorded: you said no to order %d (%s). Nothing was sent." % (a.index, plain(order)))
-    return 0
-
-
-def cmd_result(a):
-    orders, cfg, risk, state, today, now = _load(a)
-    order = _pick(orders, a.index)
-    fp = fingerprint(order)
-    rec = latest(state, fp, today)
-    if not rec or rec.get("status") != "approved":
-        raise TicketError("order %d has no yes recorded today; a result can only follow an approval" % a.index)
-    new = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fp, "symbol": rec["symbol"],
-           "side": rec["side"], "plain": rec["plain"], "status": a.status}
-    for k in ("qty", "kind", "max_loss", "stop"):
-        if rec.get(k) is not None:
-            new[k] = rec[k]
-    if a.broker_id:
-        new["broker_order_id"] = a.broker_id
-    if a.note:
-        new["note"] = a.note
-    state["orders"].append(new)
-    write_json(a.state, state)
-    print("Recorded order %d as %s." % (a.index, a.status))
-    if a.status == "placed" and a.filled_qty and a.filled_price:
-        apply_fill(a.portfolio, cfg, rec["symbol"], rec["side"], a.filled_qty, a.filled_price, today)
-        log_fill(a.state, now, today, rec["symbol"], rec["side"], a.filled_qty, a.filled_price)
-        print("Added the fill to %s." % a.portfolio)
-    elif a.status == "placed":
-        print("When it fills, record it: ticket.py fill --symbol %s --side %s --qty Q --price P"
-              % (rec["symbol"], rec["side"]))
-        if rec.get("kind") == "entry" and is_bracket(order):
-            print("When the stop-loss or the take-profit fills later, record that sell the same way.")
-    return 0
-
-
-def cmd_fill(a):
-    cfg = read_json(a.config, "config", required=False) or {}
-    now = parse_now(a.now)
-    date = a.date or to_eastern(now).date().isoformat()
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
-        raise TicketError("--date wants a date like 2026-10-19")
-    pf = apply_fill(a.portfolio, cfg, a.symbol, a.side, a.qty, a.price, date)
-    log_fill(a.state, now, date, a.symbol, a.side, a.qty, a.price)
-    print("Recorded %s %s %s at %s on %s in %s. Cash now %s." % (a.side, a.qty, a.symbol.upper(),
-                                                                _money(a.price), date, a.portfolio,
-                                                                _money(pf["cash"])))
-    return 0
-
-
-def cmd_flatten(a):
-    cfg = read_json(a.config, "config", required=False) or {}
-    sym = a.symbol.strip().upper()
+def cmd_execute(a, source=None):
+    cfg = config.load(a.config)
     now, today = _clock(a)
-    source = "the broker, get_open_position"
-    if a.qty is not None:
-        qty = _f(a.qty)
-        if qty is None or qty <= 0:
-            raise TicketError("--qty wants the number of shares you hold, like --qty 8")
-    else:
-        pf = read_json(a.portfolio, "portfolio", required=False) or {}
-        qty = sum(_f(p.get("shares", p.get("qty"))) or 0 for p in pf.get("positions", [])
-                  if str(p.get("ticker") or p.get("symbol") or "").upper() == sym)
-        source = a.portfolio
-        if qty <= 1e-9:
-            raise TicketError("nothing to flatten: no %s shares in %s. Check the broker (get_open_position "
-                              "%s) and pass --qty if you do hold some" % (sym, a.portfolio, sym))
-    plan = read_json(a.plan, "plan", required=False) or {}
-    flat_by = (plan.get("flat_by") if str(plan.get("symbol", "")).upper() == sym else None) \
-        or cfg.get("flat_by") or "15:55"
-    order = {"symbol": sym, "side": "sell", "qty": _str_num(qty), "type": "market", "time_in_force": "day",
-             "why": "flat by %s New York: closes the %s day trade before the close (qty from %s)"
-             % (flat_by, sym, source)}
-    old = read_json(a.orders, "orders", required=False)
-    replaced = len(old.get("orders", [])) if isinstance(old, dict) else 0
-    doc = {"created_by": "trader-broker", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "proposed",
-           "paper": bool(cfg.get("paper", True)),
-           "note": "Flatten ticket. Nothing is placed until trader-risk passes it and you say yes in the chat.",
-           "source": "ticket.py flatten %s on %s" % (sym, today), "orders": [order]}
-    write_json(a.orders, doc)
-    print("Flatten %s: %s (flat by %s New York)." % (sym, plain(order), flat_by))
-    print("Wrote it to %s%s." % (a.orders, (" (it replaced %d earlier proposal%s)"
-                                             % (replaced, "" if replaced == 1 else "s")) if replaced else ""))
-    if a.qty is None:
-        print("The qty comes from %s. Check it against get_open_position %s before you say yes." % (source, sym))
-    print("Next:")
-    print("  1. trader-risk: check.py. A sell that only closes what you hold is never blocked by the daily")
-    print("     limits or the entry window.")
-    print("  2. ticket.py show, then the user's yes for this one order.")
-    print("  3. If the bracket's stop-loss and take-profit are still open, Alpaca holds these shares for them")
-    print("     and rejects a new sell. Cancel them first: get_orders (status open, nested true), then")
-    print("     cancel_order_by_id for each open leg (Needs approval). Then place_stock_order with the ticket.")
+    ticket = _read_ticket(a.ticket)
+    o = ticket.get("order")
+    if not isinstance(o, dict):
+        raise TicketError("gate 2 (approval): no order on the ticket at %s; approve one first" % a.ticket)
+    if ticket.get("status") in ("placed", "filled"):
+        # already placed: re-submitting returns the existing order id (duplicate)
+        pass
+    risk_gate(o, read_json(a.risk, "risk verdict", required=False), today)
+    approval_gate(o, ticket, today)
+    payload = payload_for(o)
+    if isinstance(ticket.get("payload"), dict) and ticket["payload"] != payload:
+        raise TicketError("the ticket's stored payload no longer matches its order; approve again")
+    config.assert_live_allowed(cfg)  # fail closed before any broker call
+    host = LIVE if config.is_live(cfg) else SANDBOX
+    broker = source if source is not None else UpstoxBroker(cfg=cfg)
+    try:
+        res = broker.place(payload)
+    except UpstoxAuthError as exc:
+        print("%s: %s" % (SKILL, exc), file=sys.stderr)
+        print("%s: the Upstox access token is missing, expired or wrong: refresh "
+              "UPSTOX_ACCESS_TOKEN (it expires daily at 03:30 IST) or UPSTOX_SANDBOX_TOKEN, "
+              "then run execute again. Nothing was retried." % SKILL, file=sys.stderr)
+        return 2
+    except UpstoxError as exc:
+        print("%s: the order was not placed: %s" % (SKILL, exc), file=sys.stderr)
+        return 2
+    except orders.PlanError as exc:
+        raise TicketError("the order payload does not validate: %s" % exc)
+    order_id = res.get("order_id")
+    dup = bool(res.get("duplicate"))
+    rec = {"at": now.isoformat(), "date": today, "status": "placed", "kind": o.get("kind"),
+           "symbol": o.get("symbol"), "side": o.get("side"), "quantity": o.get("quantity"),
+           "tag": o.get("tag"), "order_id": order_id, "order_hash": ticket.get("order_hash"),
+           "duplicate": dup, "host": host}
+    _ledger_add(cfg, "orders", rec)
+    ticket["status"] = "placed"
+    ticket["result"] = {"order_id": order_id, "status": res.get("status"), "duplicate": dup,
+                        "host": host, "at": now.isoformat(), "fills": [], "positions": []}
+    write_json(a.ticket, ticket)
+    if dup:
+        print("Upstox already had this tag: existing order id %s, no new order was created." % order_id)
+    print("Sent to %s: %s" % (host, plain(o)))
+    print("order id %s, status %s" % (order_id, res.get("status")))
+    print("Follow it: python3 ticket.py result --ticket %s" % a.ticket)
     return 0
 
 
-def cmd_log(a):
-    state = load_state(a.state)
+def cmd_result(a, source=None):
+    cfg = config.load(a.config)
     now, today = _clock(a)
-    rows = [r for r in state.get("orders", []) if a.all or rec_day(r) == today]
-    if not rows:
+    ticket = _read_ticket(a.ticket)
+    res = ticket.get("result")
+    o = ticket.get("order")
+    if not isinstance(res, dict) or not res.get("order_id") or not isinstance(o, dict):
+        raise TicketError("nothing was placed from this ticket; execute first")
+    config.assert_live_allowed(cfg)
+    broker = source if source is not None else UpstoxBroker(cfg=cfg)
+    order_id = str(res["order_id"])
+    try:
+        book = _rows(broker.orders())
+        trades = _rows(broker.trades())
+        positions = _rows(broker.positions())
+    except UpstoxAuthError as exc:
+        print("%s: %s" % (SKILL, exc), file=sys.stderr)
+        print("%s: refresh the token, then run result again. Nothing was retried." % SKILL,
+              file=sys.stderr)
+        return 2
+    row = next((r for r in book if str(r.get("order_id")) == order_id), None)
+    book_status = (row or {}).get("status") or res.get("status")
+    fills = []
+    for t in trades:
+        if str(t.get("order_id")) != order_id:
+            continue
+        fills.append({"trade_id": t.get("trade_id"), "side": t.get("transaction_type"),
+                      "quantity": t.get("quantity"), "price": t.get("average_price"),
+                      "at": t.get("traded_at")})
+    filled_qty = sum(float(f["quantity"] or 0) for f in fills)
+    avg = (round(sum(float(f["price"] or 0) * float(f["quantity"] or 0) for f in fills)
+                 / filled_qty, 2) if filled_qty else None)
+    pos = next((p for p in positions if p.get("instrument_token") == o.get("instrument_key")), None)
+    position = ({"quantity": pos.get("quantity"), "average_price": pos.get("average_price"),
+                 "last_price": pos.get("last_price"), "pnl": pos.get("pnl")} if pos else None)
+    res["book_status"] = book_status
+    res["fills"] = fills
+    res["positions"] = position or []
+    res["checked_at"] = now.isoformat()
+    if str(book_status).lower() in ("complete", "filled"):
+        ticket["status"] = "filled"
+        if fills and str(o.get("side", "")).upper() == "SELL" and avg is not None:
+            pnl = a.pnl if a.pnl is not None else round((avg - float(o.get("entry"))) * filled_qty, 2)
+            _ledger_add(cfg, "trades", {"at": now.isoformat(), "date": today,
+                                        "symbol": o.get("symbol"), "side": "SELL",
+                                        "qty": filled_qty, "price": avg, "pnl": pnl,
+                                        "tag": o.get("tag")})
+    else:
+        ticket["status"] = "placed"
+    write_json(a.ticket, ticket)
+    print("order %s (%s %s %s): book status %s, %s fill(s)" % (order_id, o.get("side"),
+                                                               o.get("quantity"), o.get("symbol"),
+                                                               book_status, len(fills)))
+    for f in fills:
+        print("  fill %s: %s @ %s" % (f.get("trade_id"), f.get("quantity"), _money(f.get("price"))))
+    if position is not None:
+        print("  position: %s @ avg %s, last %s, pnl %s" % (position.get("quantity"),
+                                                            _money(position.get("average_price")),
+                                                            _money(position.get("last_price")),
+                                                            _money(position.get("pnl"))))
+    return 0
+
+
+def cmd_fill(a, source=None):
+    cfg = config.load(a.config)
+    now, today = _clock(a)
+    qty, price = float(a.qty), float(a.price)
+    if qty <= 0 or price <= 0:
+        raise TicketError("a fill needs a positive qty and price")
+    if a.side not in ("buy", "sell"):
+        raise TicketError("--side is buy or sell")
+    rec = {"at": now.isoformat(), "date": today, "symbol": a.symbol.upper(), "side": a.side,
+           "qty": qty, "price": price}
+    if a.pnl is not None:
+        rec["pnl"] = float(a.pnl)
+    state_path = getattr(a, "state", None)
+    if state_path:
+        state = read_json(state_path, "ledger", required=False) or {}
+        state.setdefault("trades", []).append(rec)
+        write_json(state_path, state)
+    else:
+        _ledger_add(cfg, "trades", rec)
+    print("Recorded %s %s %s at %s on %s." % (a.side, "%g" % qty, rec["symbol"],
+                                              _money(price), today))
+    return 0
+
+
+def cmd_flatten(a, source=None):
+    cfg = config.load(a.config)
+    now, today = _clock(a)
+    plan = load_plan(a.plan, a.symbol)
+    qty = int(a.qty) if a.qty is not None else None
+    if a.qty is not None and qty <= 0:
+        raise TicketError("--qty wants the number you hold, like --qty 25")
+    o = flatten_order(plan, cfg, qty=qty)
+    ticket = {"kind": o["kind"], "symbol": o["symbol"], "date": today, "order": o,
+              "order_hash": order_hash(o), "plain": plain(o), "payload": payload_for(o),
+              "status": "proposed", "approval": None, "result": None}
+    write_json(a.ticket, ticket)
+    print("Flatten %s: %s (flat by %s IST)." % (o["symbol"], plain(o), o.get("flat_by")))
+    print("Wrote the proposed ticket to %s. Nothing is sent yet: the same three gates apply." % a.ticket)
+    print("  1. trader-risk check.py: a fresh PASS must cover this flatten order (same plan, "
+          "so run it before you approve the entry, or again after any edit).")
+    print("  2. ticket.py approve --flatten --yes \"your reply word for word\".")
+    print("  3. ticket.py execute. The host tool card asks Allow once / Deny.")
+    print("If the stop or target leg is still open at Upstox, cancel it first: the flatten is a "
+          "separate order and the open leg can fill against it.")
+    return 0
+
+
+def cmd_log(a, source=None):
+    cfg = config.load(a.config)
+    _, today = _clock(a)
+    state = config.state_read(cfg, "orders.json", {}) or {}
+    rows = [r for r in state.get("orders", []) if a.all or r.get("date") == today]
+    trades = [t for t in state.get("trades", []) if a.all or t.get("date") == today]
+    if not rows and not trades:
         print("No decisions recorded%s." % ("" if a.all else " today"))
         return 1
     for r in rows:
-        extra = (" id " + r["broker_order_id"]) if r.get("broker_order_id") else ""
-        reply = (' reply "%s"' % r["reply"]) if r.get("reply") and r["status"] in ("approved", "declined") else ""
-        loss = (" max loss %s" % _money(r["max_loss"])) if r.get("max_loss") is not None and r["status"] == "placed" else ""
-        idx = ("#%s" % r["index"]) if r.get("index") is not None else "  "
-        print("%s  %s %-9s %s%s%s%s" % (r.get("at"), idx, r.get("status"), r.get("plain"), reply, loss, extra))
-    placed = sum(1 for r in rows if r.get("status") == "placed")
-    print("%d placed%s." % (placed, "" if a.all else " today"))
+        extra = (" tag " + str(r["tag"]) if r.get("tag") else "")
+        extra += (" id " + str(r["order_id"]) if r.get("order_id") else "")
+        print("%s  %-9s %-8s %s %s x %s%s" % (r.get("at"), r.get("status"), r.get("kind"),
+                                              r.get("side"), r.get("symbol"), r.get("quantity"),
+                                              extra))
+    for t in trades:
+        pnl = (" pnl %s" % _money(t["pnl"])) if t.get("pnl") is not None else ""
+        print("%s  fill       %-8s %s x %s @ %s%s" % (t.get("at"), t.get("symbol"), t.get("qty"),
+                                                      _money(t.get("price")), pnl))
+    print("%d order(s) placed%s." % (sum(1 for r in rows if r.get("status") == "placed"),
+                                     "" if a.all else " today"))
     return 0
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="Order tickets and your yes (trader-broker). Never places orders.")
+# ---------------------------------------------------------------- cli
+
+def main(argv=None, source=None):
+    """CLI entry. source is the injected broker seam for tests (place, orders,
+    trades, positions like UpstoxBroker); when it is None the real Upstox
+    broker is built from the config, sandbox host by default."""
+    ap = argparse.ArgumentParser(prog="ticket.py",
+        description="Order tickets and your yes (trader-broker): risk PASS, typed yes, Upstox. "
+                    "Sandbox by default.")
     sub = ap.add_subparsers(dest="cmd")
 
-    def clock(p):
-        p.add_argument("--now", help="pretend it is this New York time, e.g. \"2026-10-19 10:15\"")
-        p.add_argument("--today", help="YYYY-MM-DD (default: today in New York)")
-
     def common(p):
-        p.add_argument("--orders", default="trader/orders.json")
+        p.add_argument("--plan", default=PLAN_PATH)
+        p.add_argument("--ticket", default=TICKET_PATH)
         p.add_argument("--config", default="trader/config.json")
-        p.add_argument("--risk", default="trader/state/risk.json")
-        p.add_argument("--state", default="trader/state/broker.json")
-        clock(p)
+        p.add_argument("--risk", default=RISK_PATH)
+        p.add_argument("--now", help="pretend it is this IST time, e.g. \"2026-10-26 10:00\"")
+        p.add_argument("--today", help="YYYY-MM-DD (default: today in IST)")
 
-    p = sub.add_parser("show", help="render the tickets")
+    p = sub.add_parser("show", help="render the ticket and the exact payload")
     common(p)
-    p.add_argument("--index", type=int)
+    p.add_argument("--symbol")
+    p.add_argument("--flatten", action="store_true", help="show the flatten order instead of the entry")
     p.add_argument("--json", action="store_true")
-    p = sub.add_parser("approve", help="record the user's explicit yes for one order")
+    p = sub.add_parser("approve", help="record the user's explicit yes, bound to the order hash")
     common(p)
-    p.add_argument("--index", type=int, required=True)
-    p.add_argument("--reply", required=True, help="the user's reply, word for word")
-    p = sub.add_parser("decline", help="record a no")
+    p.add_argument("--symbol")
+    p.add_argument("--flatten", action="store_true")
+    p.add_argument("--yes", required=True, help="the user's reply, word for word")
+    p = sub.add_parser("execute", help="place the approved order through the broker seam")
     common(p)
-    p.add_argument("--index", type=int, required=True)
-    p.add_argument("--reply")
-    p = sub.add_parser("result", help="record what happened after the Allow once / Deny card")
+    p.add_argument("--symbol")
+    p = sub.add_parser("result", help="read the order book and update the ticket")
     common(p)
-    p.add_argument("--index", type=int, required=True)
-    p.add_argument("--status", required=True, choices=["placed", "denied", "failed"])
-    p.add_argument("--broker-id")
-    p.add_argument("--note")
-    p.add_argument("--filled-qty")
-    p.add_argument("--filled-price")
-    p.add_argument("--portfolio", default="trader/portfolio.json")
-    p = sub.add_parser("fill", help="record a fill in trader/portfolio.json")
+    p.add_argument("--pnl", type=float, help="override the realized P&L recorded for a filled exit")
+    p = sub.add_parser("fill", help="record a fill in the ledger by hand")
+    common(p)
+    p.add_argument("--state", default=None)
     p.add_argument("--symbol", required=True)
     p.add_argument("--side", required=True, choices=["buy", "sell"])
     p.add_argument("--qty", required=True)
     p.add_argument("--price", required=True)
-    p.add_argument("--date", help="YYYY-MM-DD (default: today in New York)")
-    p.add_argument("--now")
-    p.add_argument("--portfolio", default="trader/portfolio.json")
-    p.add_argument("--config", default="trader/config.json")
-    p.add_argument("--state", default="trader/state/broker.json")
-    p = sub.add_parser("flatten", help="a sell ticket that closes a symbol's position by flat_by")
-    p.add_argument("--symbol", required=True)
-    p.add_argument("--qty", help="shares you hold, from get_open_position (default: trader/portfolio.json)")
-    p.add_argument("--orders", default="trader/orders.json", help="where the ticket is written")
-    p.add_argument("--portfolio", default="trader/portfolio.json")
-    p.add_argument("--plan", default="trader/plan.json")
-    p.add_argument("--config", default="trader/config.json")
-    clock(p)
-    p = sub.add_parser("log", help="today's decisions")
-    p.add_argument("--state", default="trader/state/broker.json")
-    clock(p)
+    p.add_argument("--pnl", type=float)
+    p = sub.add_parser("flatten", help="prepare the opposite MARKET order under the same gates")
+    common(p)
+    p.add_argument("--symbol")
+    p.add_argument("--qty", help="override the quantity (re-run the risk check: this changes the hash)")
+    p = sub.add_parser("log", help="today's decisions and fills")
+    common(p)
     p.add_argument("--all", action="store_true")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
     try:
-        return {"show": cmd_show, "approve": cmd_approve, "decline": cmd_decline, "result": cmd_result,
-                "fill": cmd_fill, "flatten": cmd_flatten, "log": cmd_log}[a.cmd](a)
+        return {"show": cmd_show, "approve": cmd_approve, "execute": cmd_execute,
+                "result": cmd_result, "fill": cmd_fill, "flatten": cmd_flatten,
+                "log": cmd_log}[a.cmd](a, source)
     except TicketError as e:
-        print("ticket.py: %s" % e, file=sys.stderr)
-        return 1
+        print("%s: %s" % (SKILL, e), file=sys.stderr)
+        return 2
+    except (config.ConfigError, orders.PlanError, ValueError) as e:
+        print("%s: %s" % (SKILL, e), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

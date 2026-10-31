@@ -1,160 +1,116 @@
 ---
 name: trader-alerts
 description: >-
-  Price Alerts. Rings when a price, a stop or the opening bell hits. Turns
-  the trade plan into three alerts in one go (the stop, the target and "flat
-  by close" at your flat-by time), plus above / below / stop / target levels,
-  percent moves from the previous close, any time of day, and the NYSE
-  opening bell, each ringing once so you are not spammed. Knows NYSE hours
-  with the 2026 and 2027 holidays and 1:00 p.m. early closes, works out New
-  York time itself, fetches free delayed quotes (Yahoo chart JSON, Stooq
-  CSV) one ticker at a time, and writes trader/prices.json for sizing and the
-  risk check. Use when the user says "alert me when", "tell me if TSLA hits",
-  "watch my stop", "watch my trade", "remind me to close by 3:55", "is the
-  market open", "when does the market open", "get me a price", or right
-  after /trader-exit writes a plan.
-argument-hint: "[ticker] [price]"
+  The Alerts skill for Indian markets. Watches NSE prices in INR on the IST
+  clock: session bells at 09:00 (pre-open), 09:15 (open) and 15:30 (close),
+  a flat-by reminder at 15:10, and price alerts for stops and targets using
+  live Upstox quotes. Rings each alert once per session, remembers what it
+  has already rung, stays quiet on NSE holidays and weekends, and always
+  says why when a quote is missing. Use when the user says "alert me",
+  "watch this price", "remind me to flat by close", "ring me at the open",
+  or asks what alerts are armed. All amounts are INR, all times are IST,
+  the market is NSE and the broker is Upstox.
 ---
 
-# trader-alerts
+# Trader Alerts
 
-Price Alerts watches the numbers so the user does not have to stare at a
-chart. An alert is information, never an order: when a stop alert rings,
-nothing is sold by this skill. With a bracket order the stop-loss and the
-take-profit already sit at the broker and do the work; the alerts tell the
-user what happened and when it is time to be flat.
+Price alerts and the session clock for the NSE, in IST and INR. It rings a
+bell when the session opens, reminds you to go flat before the intraday
+square-off window, and rings when a stop or target is touched, using live
+Upstox quotes. Every alert rings once per session and then stays quiet; the
+next session re-arms everything by itself.
 
-`${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
+The tool is `alerts.py` in this folder, standard library Python only.
 
-```bash
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" clock                          # NYSE open or closed, next open
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --from-plan                # stop, target, flat by close from trader/plan.json
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --opening-bell
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol TSLA --stop 358.32
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol TSLA --target 370.04
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --at 15:55 --label "flat by close" --before-close
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol KO --pct 3
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" check                          # exit 0 = something rang
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote TSLA --write             # -> trader/prices.json
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote --holdings --write       # portfolio + plan tickers
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" list
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" reset tsla-plan-stop
-```
+## Safety first
 
-`--now "2026-10-19 15:55"` pins the clock (New York time); `--offline DIR`
-reads saved quote files instead of the network.
+No order goes out from here, ever. Alerts are only noise: a ring is a
+nudge for you to look at the chart, not a signal to fire an order. Nothing
+is bought, sold or scheduled by this skill; an alert fires and it is still
+always you who decides, and an order only happens through the broker skill
+after you say an explicit yes. This skill is not financial advice: it
+watches prices and rings bells, the trading decisions are yours.
 
-## What it reads and writes
+## The IST clock
 
-| file | what |
-| --- | --- |
-| `trader/plan.json` | the trade from trader-exit, for `add --from-plan` |
-| `trader/alerts.json` | the rules (`alerts.example.json` in this folder) |
-| `trader/state/alerts.json` | which rules rang and when, so each rings once |
-| `trader/prices.json` | the latest quotes, merged in, for trader-budget and trader-risk |
-| `trader/portfolio.json` | the tickers held, for `quote --holdings` |
+The session is 09:15 to 15:30 IST, with the pre-open window from 09:00.
+The bells:
 
-## Rule types
+- 09:00 pre-open bell, the session is 15 minutes away
+- 09:15 open bell, the market is open
+- 15:10 flat-by reminder, from the config `session.flat_by`
+- 15:30 close bell
 
-| type | rings when | rings again |
-| --- | --- | --- |
-| `above` / `target` | price at or above `price` | after `reset`, or on its own if `"rearm": true` and the price fell back |
-| `below` / `stop` | price at or below `price` | same |
-| `pct_move` | moved `pct` percent from the previous close (or `ref`), optional `direction` up or down | once per day at most |
-| `time` | the New York clock passed `at` ("15:55") on a trading day | once per trading day |
-| `opening_bell` | the NYSE is open | once per trading day |
-
-A rule with `"date"` is watched on that New York date only; `--from-plan`
-rules carry the plan's date, so yesterday's stop never rings today. A `time`
-rule with `"before_close": true` moves 3 hours earlier on a 1:00 p.m. early
-close, so "flat by close" at 15:55 rings at 12:55 on those days.
+A bell rings at its time, or at the first check after its time. It never
+rings early: checking at 09:14 does not ring the open bell. On weekends
+and NSE holidays no bell and no flat-by fires, and the check says the
+market is closed and why. The holiday list comes from
+`trader_core/data/nse_holidays.json`.
 
 ## Quotes
 
-- `yahoo` (default): `query2.finance.yahoo.com/v8/finance/chart/<TICKER>`, an
-  unofficial free JSON endpoint, one request per ticker, half a second apart.
-  On a 429 it waits and tries once more; on a 429 or a 5xx after that it
-  tries `query1`. It identifies itself as `day-trader-skill/2.0`.
-- `stooq`: `stooq.com/q/l/?s=tsla.us&f=sd2t2ohlcv&h&e=csv`, Stooq's free CSV.
-  It answered 404 on 2026-10-13; the parser stays for when it is back.
-- Free quotes are unofficial, delayed and can lag. They are fine for alerts
-  and for checking a size, not for timing an order. The broker's price is the
-  one that fills. Each price in `trader/prices.json` keeps its quote time, and
-  trader-risk only uses one under 15 minutes old.
-- If both are down, read the price from the broker connector (Alpaca
-  `get_stock_snapshot`, IBKR `get_price_snapshot`) and write it into
-  `trader/prices.json` as `{"as_of": "...Z", "prices": {"TSLA": 366.48}}`.
+Price alerts are evaluated on Upstox batch quotes (last traded price,
+OHLC) through the shared `trader_core` client, sandbox or live depending
+on your config. The rules file carries the Upstox instrument key, for
+example `NSE_EQ|INE002A01018` for RELIANCE.
 
-## The NYSE clock
+- A check with no price rules never calls the network.
+- A missing quote is reported plainly, "no quote for RELIANCE", and the
+  alert stays armed. It is never guessed from yesterday's close.
+- An expired or rejected Upstox access token is reported with
+  re-authenticate guidance and the check exits 2. Re-run the Upstox login
+  flow, then check again.
 
-Regular session 9:30 a.m. to 4:00 p.m. New York time, closed on weekends and
-on these holidays, from nyse.com/markets/hours-calendars (read 2026-10-13):
+Quotes are for alerting only. The last traded price can be a few seconds
+old, so never time an order from an alert ring alone.
 
-- 2026: Jan 1, Jan 19, Feb 16, Apr 3 (Good Friday), May 25, Jun 19, Jul 3
-  (Independence Day observed), Sep 7, Nov 26, Dec 25. Early close 1:00 p.m. on
-  Nov 27 and Dec 24.
-- 2027: Jan 1, Jan 18, Feb 15, Mar 26 (Good Friday), May 31, Jun 18
-  (Juneteenth observed), Jul 5 (Independence Day observed), Sep 6, Nov 25,
-  Dec 24 (Christmas observed). Early close 1:00 p.m. on Nov 26.
+## Commands
 
-Daylight saving time is worked out in the tool, so it needs no time zone
-files and ignores the computer's own zone. For any other year it says the
-holiday list is unknown.
-
-## Steps
-
-1. Right after trader-exit writes the plan, run `add --from-plan`. Confirm
-   the three alerts back to the user: the stop, the target and the flat-by time.
-2. Run `check` while the trade is open: every few minutes from a Claude
-   scheduled task or `/loop`. Each run fetches only the tickers in today's
-   rules and rings each alert once. A check reads the latest delayed quote;
-   it is not a live feed, and a price can pass a level between two checks.
-3. Tell the user what rang in one line each. A stop or target alert means the
-   bracket order has probably filled: check `get_open_position` and record the
-   fill with trader-broker. "Flat by close" means close anything still open:
-   trader-broker `flatten`, then trader-risk, then the user's yes. Never act
-   for them.
-
-## Example: the reel
-
-TSLA on Monday 2026-10-19: entry 364.18 at 10:15 AM, stop 358.32, target
-370.04, flat by 15:55. `add --from-plan` writes `tsla-plan-stop`,
-`tsla-plan-target` and `tsla-flat-by` for that day. A `check` at 10:53 reads
-the real 10:52 quote, 366.48, between the stop and the target:
-
-```
-NYSE OPEN (2026-10-19 10:53 New York, regular session).
-Nothing hit. 3 rule(s) watched today, TSLA $366.48.
+```bash
+python3 alerts.py add --symbol RELIANCE --instrument-key "NSE_EQ|INE002A01018" --above 1200
+python3 alerts.py add --symbol RELIANCE --below 1170
+python3 alerts.py add --symbol RELIANCE --stop 1183.65
+python3 alerts.py add --symbol RELIANCE --target 1203.55
+python3 alerts.py add --preopen-bell
+python3 alerts.py add --opening-bell
+python3 alerts.py add --close-bell
+python3 alerts.py add --flat-by --at 15:10 --label "flat by close"
+python3 alerts.py add --from-plan
+python3 alerts.py check
+python3 alerts.py check --now "2026-10-26 09:15" --json
+python3 alerts.py plan
 ```
 
-At 3:55 PM:
+- `add` writes a rule into `trader/alerts.json`. A price rule needs
+  `--symbol`; `--above`/`--below` watch a level, `--stop`/`--target` are
+  the plan levels, `--note` and `--date` are optional. `--from-plan`
+  copies the stop, target and flat-by from the trade plan.
+- `check` evaluates every rule right now and prints what fired. It writes
+  the seen state to `trader/state/alerts.json` so each alert rings once
+  per session; the key includes the IST date, so tomorrow everything is
+  armed again. Add `--json` for machine output: `now`, `fired`, `pending`,
+  `missing`, `errors`. Exit code is 0 for a normal quiet check, 2 only for
+  real failures (bad args, unreadable config, quote source failure).
+- `plan` prints the plan the alerts follow: `trader/plan.json` when the
+  exit skill wrote one, else `alerts.example.json` in this folder.
 
-```
-ALERT Flat by close: it is 15:55 New York (set for 15:55), the market closes at 16:00. If TSLA is still
-open, close it: trader-broker flatten --symbol TSLA builds the sell ticket, then trader-risk and your yes.
-```
+## The plan
 
-It rings once. The next morning the plan's three alerts are no longer
-watched; with `add --opening-bell`, the bell rings at 9:30.
+`add --from-plan` reads `trader/plan.json`, the plan the exit skill
+writes: `symbol`, `instrument_key`, `stop`, `target`, `flat_by` (HH:MM
+IST), plus entry and quantity. From it the skill arms the plan stop, the
+plan target and the flat-by reminder, all dated to the plan's date. With
+no plan on disk it points you at `alerts.example.json` as the shape to
+copy.
 
-## Rules
+## State and re-arming
 
-- An alert is a fact about a price or the clock. Say it as a fact.
-- Never present a quote as live. Free quotes are delayed and unofficial.
-- Confirm every new rule back to the user: ticker, type, level, day.
+Seen state lives in `trader/state/alerts.json` and is written atomically.
+Each fired alert is recorded under its symbol, alert kind, rule id and
+IST date, so:
 
-## What it never does
+- a second check in the same session stays quiet,
+- the next trading day re-arms every alert,
+- a rule with a `date` only watches that one day.
 
-It never places, cancels or changes an order, never claims a quote is
-live, and never predicts where a price is going.
-
-## Safety
-
-- Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+Delete the state file, or edit `trader/alerts.json`, to re-arm by hand.

@@ -1,25 +1,54 @@
 {
-  "budget": 5000,
-  "cash_buffer_pct": 10,
-  "max_position_pct": 75,
-  "max_order_usd": 4000,
-  "min_order_usd": 5,
-  "max_loss_per_trade_usd": 50,
-  "max_daily_loss_usd": 150,
-  "max_trades_per_day": 3,
-  "max_orders_per_day": 10,
-  "min_reward_risk": 1.0,
-  "require_stop": true,
-  "no_entries_before": "09:45",
-  "no_entries_after": "15:30",
-  "flat_by": "15:55",
-  "fractional": false,
-  "broker": "alpaca",
-  "paper": true,
-  "blocked": [],
-  "allow_options": false,
-  "allow_margin": false,
-  "allow_short": false,
-  "pdt_guard": false,
-  "sec_user_agent": "Your Name you@example.com"
+  "broker": "upstox",
+  "mode": "sandbox",
+  "state_dir": "",
+  "account": {
+    "budget_inr": 50000,
+    "max_loss_per_trade_inr": 250,
+    "max_daily_loss_inr": 500,
+    "max_trades_per_day": 3,
+    "max_orders_per_day": 12,
+    "min_reward_risk": 1.0,
+    "long_only": true
+  },
+  "session": {
+    "open": "09:15",
+    "entry_start": "09:30",
+    "entry_cutoff": "15:00",
+    "flat_by": "15:10",
+    "close": "15:30",
+    "mis_square_off": "15:25",
+    "mis_square_off_cas": "15:10"
+  },
+  "universe": {
+    "symbols": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "SBIN", "AXISBANK", "ITC"],
+    "watchlist": [],
+    "nifty500": false,
+    "series": "EQ"
+  },
+  "charges": {
+    "brokerage_bps": 5.0,
+    "brokerage_per_order_inr": 20.0,
+    "stt_intraday_sell_bps": 2.5,
+    "exchange_bps": 0.297,
+    "sebi_bps": 0.01,
+    "stamp_bps": 0.3,
+    "gst_pct": 18.0
+  },
+  "data": {
+    "tick_default": "1m",
+    "quote_batch": 50,
+    "rate_limit_per_sec": 10,
+    "timeout_s": 30
+  },
+  "products": {
+    "default": "I"
+  },
+  "risk": {
+    "mis_products": ["I"],
+    "blocked_symbols": [],
+    "asm_symbols": [],
+    "gsm_symbols": [],
+    "ban_symbols": []
+  }
 }

@@ -1,0 +1,5 @@
+{"status":"success","data":{
+ "NSE_EQ:RELIANCE":{"last_price":1193.6,"net_change":8.2,"ohlc":{"open":1186.1,"high":1192.0,"low":1175.3,"close":1185.4,"volume":43170},"timestamp":"2026-10-26T10:00:00+05:30"},
+ "NSE_EQ:TCS":{"last_price":null,"net_change":0.0,"ohlc":{"open":null,"high":null,"low":null,"close":3120.5,"volume":0},"timestamp":"2026-10-26T09:00:00+05:30"},
+ "NSE_EQ:SBIN":{"last_price":812.35,"net_change":2.25,"ohlc":{"open":809.0,"high":815.9,"low":807.2,"close":810.1,"volume":1204550},"timestamp":"2026-10-26T10:00:00+05:30"}
+}}

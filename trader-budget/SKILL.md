@@ -1,166 +1,178 @@
 ---
 name: trader-budget
 description: >-
-  Budget Manager. Sizes every position to your budget and your max loss per
-  trade. Reads the trade plan from trader-exit (entry, stop, target), finds
-  the whole shares that fit inside four limits (max loss per trade, position
-  cap, max order, cash after your buffer), says which limit decided it, and
-  writes ONE bracket order (entry, stop-loss, take-profit) to
-  trader/orders.json in the exact shape of Alpaca's place_stock_order. A stop
-  too far away for your max loss is a plain refusal, not a smaller order.
-  Nothing is placed. Use when the user says "how many shares", "size this
-  trade", "how much should I buy", "I have $5,000", "I only want to risk $50
-  a trade", "set my rules", "keep 10% in cash", or after /trader-exit writes
-  a plan.
-argument-hint: "[budget in dollars]"
+  Budget Manager for Indian markets. Sizes every trade to your INR budget and
+  your max loss per trade. Reads the trade plan from trader-exit (entry, stop,
+  target), loads the instrument row from a recorded Upstox master slice, snaps
+  every price onto the tick grid (0.05, 1 or 10) without ever widening the
+  risk, rounds the quantity down to whole exchange lots (equity lot 1, NIFTY
+  and BANKNIFTY lots from the Upstox master), and prints ONE two-leg MIS plan
+  (entry, stop and target legs in the Upstox v3 shape) for trader-risk to
+  check and trader-broker to place. A stop too far away for your max loss is
+  a plain refusal, not a smaller order. Nothing is placed. All amounts are
+  INR, all times are IST, the market is NSE and the broker is Upstox. Use
+  when the user says "how many shares", "size this trade", "how much should
+  I buy", "I have Rs 50,000", "I only want to risk Rs 250 a trade", "set my
+  rules", or after /trader-exit makes a plan.
+argument-hint: "[budget in rupees]"
 ---
 
 # trader-budget
 
-The Budget Manager turns a plan ("buy TSLA at 364.18, stop 358.32") into an
-exact order ("buy 8 shares"), inside rules the user sets once. The stop
-decides the size: the further away the stop, the fewer shares. It writes a
-proposal only. trader-risk checks it and trader-broker asks the user yes or
-no. Day trading loses most people money. Sizing to a max loss keeps each
-loss small; it does not make a trade win.
+The Budget Manager turns a plan ("buy RELIANCE at 1193.60, stop 1183.65")
+into an exact order ("buy 25"), inside rules the user sets once. The stop
+decides the size: the further away the stop, the fewer shares or lots.
+It prints a proposal only. trader-risk checks it and trader-broker asks the
+user yes or no. Day trading loses most people money. Sizing to a max loss
+keeps each loss small; it does not make a trade win.
 
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/size.py"                        # trader/plan.json + trader/config.json
-python3 "${CLAUDE_SKILL_DIR}/size.py" --write                # write trader/orders.json
-python3 "${CLAUDE_SKILL_DIR}/size.py" --limit --write        # a limit order at the plan's entry
-python3 "${CLAUDE_SKILL_DIR}/size.py" --limit 364.00 --json  # a limit order at 364.00
-python3 "${CLAUDE_SKILL_DIR}/size.py" --weights AAPL=40,KO=60 --config split.json   # weights mode, below
+python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json
+python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json --json
+python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json --budget 200000 --max-loss 800
+python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json --instruments instruments.json
+python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json --now "2026-10-26 10:00"
+python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json --write
 ```
 
-`--now "2026-10-19 10:15"` pins the clock (New York time). A plan for
-another day is refused: make a new one with trader-exit.
+`--now "2026-10-26 10:00"` pins the clock, IST. A plan dated for another day
+is refused: make a new one with trader-exit. Exit codes: 0 sized, 1 refused
+(no order), 2 bad input.
 
 ## What it reads and writes
 
 | file | what |
 | --- | --- |
+| `trader/plan.json` | the trade: entry, stop, target, setup, date. trader-exit prints it and saves it only with `--write`, to this same default path |
 | `trader/config.json` | the rules (start from `config.example.json` in this folder) |
-| `trader/plan.json` | the trade: entry, stop, target, setup, flat-by time (trader-exit writes it) |
-| `trader/prices.json` | optional: a fresh price above the plan's entry means a bigger risk (trader-alerts writes it) |
-| `trader/portfolio.json` | optional: its cash caps the size (trader-broker keeps it) |
-| `trader/orders.json` | the one proposed bracket order it writes with `--write` |
+| `--instruments` file | a recorded Upstox instrument master slice: lot, tick, freeze |
+| stdout | the sized plan: the report, or the full JSON with `--json` |
+
+It writes no file unless you pass `--write`: then it saves the sized plan,
+the exact JSON trader-risk checks and trader-broker turns into orders, to
+`trader/plan.json` (or the PATH you give). Without `--write` the sized plan
+goes to stdout only. Nothing is placed either way.
 
 ## Step 1: set the rules once
 
-If `trader/config.json` does not exist, copy `config.example.json` into
-`trader/config.json` and ask the user for each value in plain words:
+If `trader/config.json` does not exist, copy `config.example.json` from this
+folder and ask the user for each value in plain words:
 
-- **budget**: how much money this is for. Only money they can afford to lose.
-- **cash_buffer_pct**: how much always stays in cash (default 10).
-- **max_loss_per_trade_usd**: the most one trade may lose if the stop fills at the stop (default 50).
-- **max_position_pct**, **max_order_usd**, **min_order_usd**: the biggest position (75% of the
-  budget), the biggest order ($4,000) and the smallest order ($5).
-- The day limits trader-risk enforces: **max_daily_loss_usd** (150), **max_trades_per_day** (3),
-  **min_reward_risk** (1.0), **require_stop** (true), **no_entries_before** / **no_entries_after**
-  ("09:45" / "15:30") and **flat_by** ("15:55"), all New York time.
-- **blocked**: tickers they never want to trade.
-- Keep **paper** true until they have watched it work on a paper account.
+- **account.budget_inr**: how much money this is for (example: 50000). Only
+  money they can afford to lose.
+- **account.max_loss_per_trade_inr**: the most one trade may lose at the
+  stop, before charges (example: 250).
+- The day limits trader-risk enforces: **account.max_daily_loss_inr** (500),
+  **account.max_trades_per_day** (3), **account.max_orders_per_day** (12),
+  **account.min_reward_risk** (1.0) and **account.long_only** (true).
+- **session**, all IST: open 09:15, entries 09:30 to 15:00, flat by 15:10,
+  close 15:30, MIS square-off 15:25 (15:10 on CAS accounts).
+- **charges**: brokerage (5 bps or Rs 20 an order), STT, exchange, SEBI,
+  stamp duty and 18% GST; trader-risk measures the loss net of these.
+- **risk.ban_symbols / asm_symbols / gsm_symbols**: the user's own lists to
+  be warned about; nothing here watches an exchange feed for them.
+- Keep **mode** "sandbox" until they have watched it work. Going live needs
+  the typed phrase GO LIVE WITH UPSTOX and a stored confirmation.
 
 ## Step 2: size the trade
 
-```bash
-python3 "${CLAUDE_SKILL_DIR}/size.py" --write
-```
+Give the instrument row: `--instruments` with a recorded Upstox master slice
+(the same master the scanner and entry skills use). The row decides the lot
+size (equity lot is 1, NIFTY 75, every F&O symbol from the master), the tick
+grid and the freeze quantity.
 
-Whole shares only: Alpaca takes no fractions in a bracket order. The size is
-the smallest of four limits:
+Whole exchange lots only. The size is the smallest of three limits:
 
-| limit | shares |
+| limit | lots |
 | --- | --- |
-| max loss | `max_loss_per_trade_usd` / risk a share (entry minus stop) |
-| position cap | budget x `max_position_pct` / entry |
-| max order | `max_order_usd` / entry |
-| cash | (budget minus the cash buffer) / entry, never more than the cash in `trader/portfolio.json` |
+| max loss | `max_loss_per_trade_inr` / (risk a unit x lot size), floored |
+| budget | `budget_inr` / (entry x lot size), floored |
+| freeze | the instrument's freeze quantity / lot size, floored |
 
-The entry it sizes at: the limit price with `--limit`. For a market order, the
-plan's entry, or the price in `trader/prices.json` if it is fresh (under 15
-minutes old) and higher. A price that ran up since the plan means a bigger
-loss at the same stop, so fewer shares. A lower price never shrinks the risk.
+The plan is long only ("direction": "long"): this pack does not size shorts.
 
-It refuses, and writes no order, when: the size is zero shares, the order is
-under the minimum, reward:risk is under `min_reward_risk`, the stop is not
-below the entry, the target is not above it (the move already happened), the
-plan is for another day, the ticker is blocked, or the plan is a short. Say
-the reason to the user in one line.
+Before the math, every price is snapped onto the tick grid in the direction
+that never widens the risk: the stop moves down (never closer to the entry),
+the target moves up (never closer), the entry itself never up. Minimum risk
+is one tick. A 1193.62 entry with a 1183.67 stop on the 0.05 grid becomes
+1193.60 and 1183.65: the risk stays 9.95 a unit and never grows.
+
+It refuses, and prints no order, when: one lot costs more than the budget,
+one lot risks more than the max loss at the stop, the stop is not below the
+entry after rounding, the target is not above it, the plan is for another
+day, or the plan is a short. Say the reason to the user in one line.
 
 ## Step 3: show the user
 
-Show the four limits, which one decided the size, the shares, the dollars
-and the max loss at the stop. Say plainly that a stop is an order, not a
-promise: in a fast market it can fill below the stop. Then hand over to
-`/trader-risk`.
+Show the three limits, which one decided the size (`bound_by` in the JSON),
+the quantity in units and lots, the cost in INR and the max loss at the
+stop. Say plainly that a stop is an order, not a promise: in a fast market
+it can fill below the stop, and charges make the real loss a little bigger.
+Save it with `--write` so trader-risk checks exactly the plan trader-broker
+will place, then hand over to `/trader-risk`.
 
 ## Example: the reel
 
-TSLA on Monday 2026-10-19. Opening-range breakout: entry 364.18 at 10:15 AM,
-stop 358.32 (the opening-range midpoint), target 370.04 (1R). Risk 5.86 a
-share. The example config: $5,000 budget, 10% cash buffer, $50 max loss.
+NIFTY on Monday 2026-10-26, sized at 10:00 IST: entry 25150.0, stop 25100.0
+(the opening-range midpoint), target 25250.0 (1R). Risk 50.0 a unit, so
+3750 a lot. Budget Rs 20,00,000, max loss Rs 8,000. Max loss would allow two
+lots; the budget allows one, so the budget decides:
 
-| limit | the math | shares |
-| --- | --- | --- |
-| max loss | $50 / 5.86 | **8 (decides it)** |
-| position cap | 75% of $5,000 = $3,750 / 364.18 | 10 |
-| max order | $4,000 / 364.18 | 10 |
-| cash | $5,000 minus $500 = $4,500 / 364.18 | 12 |
+```
+NIFTY long, entry 25150, stop 25100, target 25250 (tick 0.05)
+Size: 75 units of NIFTY = 1 lots (lot size 75). Cost Rs 1,886,250.
+Risk at the stop: Rs 3,750 of your Rs 8,000 max loss. Reward:risk 2.0. Bound by the budget.
+Flat by 15:10 IST, before the MIS square-off. Product I (intraday).
 
-8 shares = $2,913.44. Max loss at the stop: 8 x 5.86 = $46.88. It writes:
-
-```json
-{"symbol": "TSLA", "side": "buy", "qty": "8", "type": "market", "time_in_force": "day",
- "order_class": "bracket", "take_profit_limit_price": "370.04", "stop_loss_stop_price": "358.32",
- "why": "opening-range breakout on TSLA: 8 shares, bound by your $50 max loss per trade (8 x 5.86 = $46.88 at the stop)",
- "plan": {"entry": 364.18, "stop": 358.32, "target": 370.04, "risk_per_share": 5.86, "max_loss": 46.88,
-          "setup": "orb", "entry_time": "10:15 AM", "flat_by": "15:55"}}
+Next: trader-risk checks this plan, then trader-broker asks you yes or no.
+Education and tooling, not financial advice.
 ```
 
-`why` and `plan` are notes for trader-risk and trader-broker. They are never
-sent to Alpaca. With the stop at 300.00 instead, one share would risk 64.18,
-more than the $50 max loss: no order. At 10:52 the real quote was 366.48, so
-the same plan sizes to 6 shares at 8.16 a share, and reward:risk falls to
-0.44: refused, because the move it was waiting for has mostly happened.
+The same plan with a Rs 10,00,000 budget refuses, because one lot costs more
+than the budget:
 
-## Weights mode (kept from v1)
+```
+No order: one lot of NIFTY (75 units) costs Rs 1,886,250 at the entry, more than your Rs 1,000,000 budget. No order. Raise the budget, or pick a cheaper instrument.
+```
 
-`--weights AAPL=22.04,KO=10.86` or `--targets FILE` (`targets.example.json`
-here) splits a budget across a list by weight: the cash buffer comes off the
-top, weights are renormalised to 100, any stock over `max_position_pct` is
-pinned at the cap and its excess shared out, slices under the minimum order
-are dropped, and amounts round to whole dollars so nothing is left idle by
-accident. With `"max_position_pct": 25` and `"fractional": true`, the example
-file gives AAPL $1,250 (capped), AXP $1,119, GOOGL $823, KO $708, BAC $600.
-With `"fractional": false` (the example config) it buys whole shares and
-needs prices (`--prices trader/prices.json`). These are plain buys with no stop: trader-risk blocks them while
-`require_stop` is true and counts each one against `max_trades_per_day`. Use
-a separate config (`--config`) for a long-term split.
+For an equity plan (RELIANCE, lot 1): entry 1193.60, stop 1183.65, target
+1203.55, 25 shares. Risk 9.95 a share, Rs 248.75 gross at the stop; with the
+example charges the round trip adds Rs 45.53 of STT, exchange, SEBI, stamp
+duty, GST and brokerage, so trader-risk judges the Rs 294.28 net loss
+against the cap. Gross loss never rounds up: the sizing floors the lots.
 
 ## Rules
 
-- Proposals only. This skill never calls a broker tool.
-- Never size money the user has not said is for this. Ask for the budget and the max loss.
-- Every number comes from the config, the plan or the prices. Nothing is guessed.
-- No projections: never say what a trade will make. A target is a plan, not a forecast.
-- Free Yahoo prices are unofficial and can lag. The broker's price is the one that fills.
+- Proposals only. This skill never calls a broker tool and never places,
+  approves or schedules an order.
+- Never size money the user has not said is for this. Ask for the budget
+  and the max loss in INR.
+- Every number comes from the config, the plan or the instrument row.
+  Nothing is guessed; nothing is rounded in the user's favor.
+- No projections: never say what a trade will make. A target is a plan,
+  not a forecast.
+- Upstox quotes can lag; the broker's price is the one that fills.
 
 ## What it never does
 
-It never places, approves or schedules an order, never raises a limit on its
-own, never shrinks a stop to fit more shares, and never sizes options,
-margin or short positions.
+It never places an order, never raises a limit on its own, never shrinks a
+stop to fit more lots, never puts a price off the tick grid, and never sizes
+options, margin or short positions.
 
 ## Safety
 
-- Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Education and tooling, not financial advice.
+- Sandbox by default (`"mode": "sandbox"`). Going live is the user's own
+  decision: mode "live", the typed phrase GO LIVE WITH UPSTOX and a stored
+  confirmation, or the tools refuse.
+- Nothing in this pack places an order except trader-broker, and only when
+  all three hold: trader-risk passed that exact plan, the user typed an
+  explicit yes for it in the chat, and the order tool is set to "Needs
+  approval" (Customize > Connectors > tool permissions). Never set an order
+  tool to "Always allow".
+- No options, margin or leverage unless the config allows it and the user
+  confirms.
+- Upstox tokens live in environment variables (UPSTOX_ACCESS_TOKEN and
+  friends) or the local login state, never in the chat or the config file.
