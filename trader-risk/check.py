@@ -428,7 +428,7 @@ def main(argv=None, source=None):
         try:
             from trader_core import instruments as instruments_mod
             with open(args.instruments, "r", encoding="utf-8") as fh:
-                rows = instruments_mod.load(json.load(fh))
+                rows = instruments_mod.load(fh.read())
             instrument = instruments_mod.find(rows, plan_.get("symbol") or "")
         except (OSError, ValueError) as exc:
             print("%s: cannot use the instrument master %s: %s" % (SKILL, args.instruments, exc),
