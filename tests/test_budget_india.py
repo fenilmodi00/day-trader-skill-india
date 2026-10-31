@@ -66,6 +66,12 @@ def rel_legs(entry=1193.6, stop=1183.65, target=1203.55, qty=25):
             "lot_size": 1, "product": "I"}
 
 
+def rel_legs_no_date():
+    p = rel_legs()
+    p.pop("date")
+    return p
+
+
 def size_nifty(cfg=None, **over):
     return size.size_plan(nifty_plan(), cfg or base_cfg(), NIFTY, today=MON, **over)
 
@@ -202,6 +208,39 @@ class PlanContract(unittest.TestCase):
             self.assertNotIn(word, doc)
 
 
+class PositiveLimits(unittest.TestCase):
+    """#2.3: a limit that is 0, negative, missing or not a number is a refusal,
+    never "no limit"."""
+
+    def test_a_limit_that_is_not_a_positive_number_is_refused(self):
+        plan = rel_legs()
+        for over in ({"budget": 0}, {"budget": -5}, {"budget": "fifty"}, {"budget": True},
+                     {"max_loss": 0}, {"max_loss": -5}, {"max_loss": "fifty"}, {"max_loss": True},
+                     {"budget": 0, "max_loss": 0}):
+            with self.assertRaises(size.SizeError) as cm:
+                size.size_plan(plan, base_cfg(), REL, today=MON, **over)
+            self.assertNotIn("\n", str(cm.exception))
+        # an explicit None param means "not passed": it falls back to the config,
+        # so only a bad config value is a refusal
+        for key, value in (("budget_inr", 0), ("budget_inr", -5), ("budget_inr", "fifty"),
+                           ("budget_inr", True), ("budget_inr", None),
+                           ("max_loss_per_trade_inr", 0), ("max_loss_per_trade_inr", -5),
+                           ("max_loss_per_trade_inr", None), ("max_loss_per_trade_inr", True)):
+            with self.assertRaises(size.SizeError) as cm:
+                size.size_plan(plan, base_cfg(**{key: value}), REL, today=MON)
+            self.assertIn("%s must be a positive number" % key, str(cm.exception))
+        # a config whose limit never became a number says what it got
+        with self.assertRaises(size.SizeError) as cm:
+            size.size_plan(plan, base_cfg(budget_inr="fifty"), REL, today=MON)
+        self.assertEqual(str(cm.exception), "budget_inr must be a positive number, got 'fifty'")
+
+    def test_a_plan_without_a_date_is_refused(self):
+        for p in (rel_legs_no_date(), rel_legs_no_date() | {"date": None}, rel_legs_no_date() | {"date": ""}):
+            with self.assertRaises(size.SizeError) as cm:
+                size.size_plan(p, base_cfg(), REL, today=MON)
+            self.assertEqual(str(cm.exception), "the plan has no date: make it with trader-exit")
+
+
 class Cli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dt-t7-budget-")
@@ -285,8 +324,8 @@ class WritePlan(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.inst = os.path.join(DIR, "instruments.json")
 
-    def write_src(self):
-        path = os.path.join(self.tmp, "incoming.json")
+    def write_src(self, name="incoming.json"):
+        path = os.path.join(self.tmp, name)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(rel_legs(), fh)
         return path
@@ -326,6 +365,78 @@ class WritePlan(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(text)["plan"]["quantity"], 25)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "trader", "plan.json")))
+
+    def test_a_refusal_with_write_removes_the_stale_proposal(self):
+        out = os.path.join(self.tmp, "sized.json")
+        removed = "Removed the stale proposal at %s" % out
+
+        def good():
+            code, _, err = self.run_cli(["--plan", self.write_src(), "--instruments", self.inst,
+                                         "--now", MON, "--write", out])
+            self.assertEqual(code, 0, err)
+            self.assertTrue(os.path.exists(out))
+
+        good()
+        # a zero-share refusal (the max loss cannot cover one unit of risk)
+        # without --write leaves yesterday's file alone
+        bad = os.path.join(self.tmp, "bad-plan.json")
+        with open(bad, "w", encoding="utf-8") as fh:
+            json.dump(rel_legs(), fh)
+        code, text, err = self.run_cli(["--plan", bad, "--instruments", self.inst,
+                                        "--now", MON, "--max-loss", "5"])
+        self.assertEqual(code, 1)
+        self.assertNotIn("stale", text)
+        self.assertNotIn("stale", err)
+        self.assertTrue(os.path.exists(out))
+        # the same refusal with --write: the file goes, and one line says so
+        code, text, err = self.run_cli(["--plan", bad, "--instruments", self.inst,
+                                        "--now", MON, "--max-loss", "5", "--write", out])
+        self.assertEqual(code, 1)
+        self.assertIn(removed, err)
+        self.assertEqual(err.count("Removed the stale"), 1)
+        self.assertFalse(os.path.exists(out))
+        # a refusal raised as an error (the plan is for another day) removes it too
+        good()
+        late = self.write_src("late-plan.json")
+        code, _, err = self.run_cli(["--plan", late, "--instruments", self.inst,
+                                     "--now", "2026-10-27 10:00", "--write", out])
+        self.assertEqual(code, 2)
+        self.assertIn(removed, err)
+        self.assertIn("the plan is for 2026-10-26", err)
+        self.assertFalse(os.path.exists(out))
+        # an undated plan: refused as an error, stale file gone
+        good()
+        undated = os.path.join(self.tmp, "undated.json")
+        with open(undated, "w", encoding="utf-8") as fh:
+            json.dump(rel_legs_no_date(), fh)
+        code, _, err = self.run_cli(["--plan", undated, "--instruments", self.inst,
+                                     "--now", MON, "--write", out])
+        self.assertEqual(code, 2)
+        self.assertIn("the plan has no date", err)
+        self.assertFalse(os.path.exists(out))
+
+    def test_an_unexpected_error_is_one_line(self):
+        # a config file whose sections are not objects: one line, not a traceback
+        out = os.path.join(self.tmp, "sized.json")
+
+        def good():
+            code, _, err = self.run_cli(["--plan", self.write_src(), "--instruments", self.inst,
+                                         "--now", MON, "--write", out])
+            self.assertEqual(code, 0, err)
+            self.assertTrue(os.path.exists(out))
+
+        good()
+        bad_cfg = os.path.join(self.tmp, "bad.json")
+        with open(bad_cfg, "w", encoding="utf-8") as fh:
+            json.dump({"account": []}, fh)
+        code, _, err = self.run_cli(["--plan", self.write_src(), "--instruments", self.inst,
+                                     "--now", MON, "--config", bad_cfg, "--write", out])
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("trader-budget: unexpected AttributeError"), err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        # the failure is in config.load, before sizing: drop_stale is a SizeError
+        # path and has nothing to say here (covered by the test above)
 
 
 class ExampleConfigs(unittest.TestCase):

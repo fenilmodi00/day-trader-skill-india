@@ -346,7 +346,8 @@ class SourceInjection(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_injected_source_drives_the_scan(self):
-        doc = json.load(open(ORB_FILE))
+        with open(ORB_FILE, encoding="utf-8") as f:
+            doc = json.load(f)
         rows = doc[KEY]
         seen_keys = []
 
@@ -450,6 +451,275 @@ class LiveDailyCache(unittest.TestCase):
         self.assertIn(code, (0, 1), err)
         self.assertEqual(doc["sessions_supplied"], scan.SESSIONS_NEEDED)
         self.assertEqual(len(os.listdir(self.cache)), scan.SESSIONS_NEEDED)
+
+
+class RateLimiting(unittest.TestCase):
+    """Upstream #2.7: honour 429 Retry-After, stop after three rate-limited
+    batches, and say PARTIAL instead of pretending the scan is complete."""
+
+    def test_retry_after_parses_and_caps_at_30s(self):
+        from trader_core import http as http_mod
+        self.assertEqual(http_mod.retry_after({"Retry-After": "12"}), 12.0)
+        self.assertEqual(http_mod.retry_after({"retry-after": "45"}), 30.0)
+        self.assertEqual(http_mod.retry_after({"Retry-After": "0"}), 0.0)
+        self.assertEqual(http_mod.retry_after({"Retry-After": "-5"}), 0.0)
+        # HTTP-date and junk mean no usable guidance
+        self.assertIsNone(http_mod.retry_after({"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}))
+        self.assertIsNone(http_mod.retry_after({"Retry-After": "soon"}))
+        self.assertIsNone(http_mod.retry_after(None))
+        self.assertIsNone(http_mod.retry_after({}))
+
+    def test_upstox_429_error_carries_the_capped_retry_after(self):
+        from trader_core import http as http_mod
+        try:
+            http_mod.raise_for_response(429, "{}", {"Retry-After": "99"})
+        except http_mod.UpstoxRateLimit as e:
+            self.assertEqual(e.retry_after, 30.0)
+        else:
+            self.fail("429 must raise UpstoxRateLimit")
+        try:
+            http_mod.raise_for_response(429, "{}", {})
+        except http_mod.UpstoxRateLimit as e:
+            self.assertIsNone(e.retry_after)
+        else:
+            self.fail("429 must raise UpstoxRateLimit")
+
+    def test_upstox_client_surfaces_the_retry_after_header(self):
+        def transport(method, url, payload=None, headers=None, timeout=30):
+            return 429, json.dumps({"status": "error", "errorCode": "RATE_LIMIT",
+                                    "message": "too many"}), {"Retry-After": "3"}
+
+        client = scan.upstox_mod.Client({}, transport=transport, token="offline")
+        try:
+            client.quote([KEY])
+        except scan.UpstoxRateLimit as e:
+            self.assertEqual(e.retry_after, 3.0)
+        else:
+            self.fail("429 must surface as UpstoxRateLimit with the header")
+
+    def test_breaker_trips_on_three_consecutive_and_resets_between(self):
+        brk = scan.RateLimitBreaker()
+        self.assertFalse(brk.record(True))
+        self.assertFalse(brk.record(True))
+        self.assertTrue(brk.record(True))
+        self.assertTrue(brk.tripped)
+        brk = scan.RateLimitBreaker()
+        for limited in (True, True, False, True, True):
+            self.assertFalse(brk.record(limited))
+        self.assertTrue(brk.record(True))
+
+    def test_rate_limited_recognizes_both_hosts(self):
+        import urllib.error
+        self.assertTrue(scan.rate_limited(urllib.error.HTTPError("u", 429, "slow", {}, None)))
+        self.assertFalse(scan.rate_limited(urllib.error.HTTPError("u", 404, "no", {}, None)))
+        self.assertTrue(scan.rate_limited(scan.UpstoxRateLimit("x", status=429)))
+        self.assertFalse(scan.rate_limited(scan.ScanError("plain")))
+
+    def test_orb_stops_after_three_rate_limited_symbols(self):
+        calls = []
+
+        class Src:
+            def intraday(self, instrument_key, interval="1m"):
+                calls.append(instrument_key)
+                raise scan.upstox_mod.UpstoxRateLimit("429", status=429)
+
+        entries = [{"symbol": s, "instrument_key": "k" + s} for s in ("A", "B", "C", "D", "E")]
+        hits, skipped = scan.scan_orb(Src(), entries, datetime.date(2026, 10, 26), None, 15,
+                                      breaker=scan.RateLimitBreaker())
+        self.assertEqual(len(calls), 3, calls)  # D and E were never requested
+        self.assertEqual(set(skipped), {"A", "B", "C"})
+        self.assertEqual(hits, [])
+
+    def test_orb_partial_keeps_fetched_hits_and_stamps_partial(self):
+        with open(ORB_FILE, encoding="utf-8") as f:
+            doc_rows = json.load(f)[KEY]
+
+        class HalfRateLimited:
+            def __init__(self):
+                self.n = 0
+
+            def intraday(self, instrument_key, interval="1m"):
+                self.n += 1
+                if self.n <= 2:
+                    raise scan.upstox_mod.UpstoxRateLimit("429", status=429)
+                return doc_rows
+
+        entries = [{"symbol": "A", "instrument_key": "kA"},
+                   {"symbol": "B", "instrument_key": "kB"},
+                   {"symbol": "RELIANCE", "instrument_key": KEY}]
+        brk = scan.RateLimitBreaker()
+        hits, skipped = scan.scan_orb(HalfRateLimited(), entries, datetime.date(2026, 10, 26),
+                                      None, 15, breaker=brk)
+        self.assertEqual([h["symbol"] for h in hits], ["RELIANCE"])
+        brk.record(True)
+        brk.record(True)
+        self.assertTrue(brk.record(True))  # 2 from the scan + the 3 after it: PARTIAL
+        stamped = scan.partial_doc({"note": scan.NOTE}, brk)
+        self.assertTrue(stamped["partial"])
+        self.assertTrue(stamped["note"].startswith("PARTIAL"))
+
+    def test_daily_stops_after_three_rate_limited_bhavcopies(self):
+        import urllib.error
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        cache = os.path.join(tmp, "bhavcopy")
+        os.makedirs(cache)
+        anchor_text = ("SYMBOL,SERIES,DATE1,PREV_CLOSE,CLOSE_PRICE,TTL_TRD_QNTY,TURNOVER_LACS\n"
+                       "RELIANCE,EQ,,100.0,101.0,500000,5000.0\n")
+        with open(os.path.join(cache, "sec_bhavdata_full_27102026.csv"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(anchor_text)
+        requested = []
+
+        def fetch(day):
+            requested.append(day.isoformat())
+            raise urllib.error.HTTPError("u", 429, "slow", {"Retry-After": "0"}, None)
+
+        sessions = scan.live_sessions(datetime.date(2026, 10, 27), cache, fetch,
+                                      breaker=scan.RateLimitBreaker())
+        self.assertEqual(len(requested), 3, requested)  # breaker stopped the rest
+        self.assertEqual([d for d, _ in sessions], [datetime.date(2026, 10, 27)])
+
+    def test_daily_refuses_when_the_scan_day_itself_is_rate_limited(self):
+        import urllib.error
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+
+        def fetch(day):
+            raise urllib.error.HTTPError("u", 429, "slow", {"Retry-After": "0"}, None)
+
+        with self.assertRaises(scan.ScanError) as ctx:
+            scan.live_sessions(datetime.date(2026, 10, 27), tmp, fetch,
+                               breaker=scan.RateLimitBreaker())
+        self.assertIn("rate-limited", str(ctx.exception))
+        # without a breaker a raw 429 still propagates (caller decides)
+        with self.assertRaises(urllib.error.HTTPError):
+            scan.live_sessions(datetime.date(2026, 10, 27), tmp, fetch)
+
+    def test_orb_hard_error_when_every_symbol_is_rate_limited(self):
+        class AlwaysLimited:
+            def intraday(self, instrument_key, interval="1m"):
+                raise scan.upstox_mod.UpstoxRateLimit("429", status=429)
+
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        uni = write_universe(os.path.join(tmp, "universe.txt"))
+        out = os.path.join(tmp, "watchlist.json")
+        argv = ["orb", "--universe", uni, "--out", out, "--symbols", "RELIANCE",
+                "--now", "2026-10-26 10:30", "--no-write", "--json"]
+        code, out_text, err = run(argv, source=AlwaysLimited())
+        self.assertEqual(code, 2, err)
+        self.assertIn("RELIANCE: 429", err)  # all symbols skipped -> hard error, unchanged
+
+    def test_retry_after_zero_is_honoured_without_delay(self):
+        import time as time_mod
+        import urllib.error
+        e429 = urllib.error.HTTPError("u", 429, "slow", {"Retry-After": "0"}, None)
+        t0 = time_mod.monotonic()
+        self.assertEqual(scan.sleep_retry_after(e429), 0.0)
+        self.assertLess(time_mod.monotonic() - t0, 1.0)
+        self.assertIsNone(scan.sleep_retry_after(urllib.error.HTTPError(
+            "u", 429, "slow", {}, None)))
+
+
+class BarSettling(unittest.TestCase):
+    """Upstream #2.7: a 5m bar counts only once the feed's own last-trade time
+    caught up (or the 60s settle grace passed): the entry.py rule."""
+
+    def rows_of(self, upto=None):
+        doc = json.load(open(ORB_FILE))
+        rows = [r for r in doc[KEY] if str(r[0]).startswith("2026-10-26")]
+        if upto:
+            rows = [r for r in rows if str(r[0]) < upto]
+        return rows
+
+    def test_settled_cutoff_waits_for_the_feed_to_catch_up(self):
+        IST = scan.upstox_mod.IST
+
+        def bar(hh, mm):
+            return {"dt": datetime.datetime(2026, 10, 26, hh, mm, tzinfo=IST)}
+
+        now = datetime.datetime(2026, 10, 26, 9, 59, 0, tzinfo=IST)
+        # feed's newest candle is 09:50: settle at the feed's own word, not the clock
+        self.assertEqual(scan.settled_cutoff([bar(9, 15), bar(9, 50)], now),
+                         datetime.datetime(2026, 10, 26, 9, 50, tzinfo=IST))
+        # feed caught up within the 60s settle grace: settle at the clock
+        late = datetime.datetime(2026, 10, 26, 9, 50, 30, tzinfo=IST)
+        self.assertEqual(scan.settled_cutoff([bar(9, 50)], late), late)
+        self.assertIsNone(scan.settled_cutoff([], now))
+
+    def test_lagging_feed_does_not_count_the_bar_that_just_closed(self):
+        # the feed's 1m candles end 09:59 (its 09:55 bucket is complete on the feed's
+        # own word) while the clock says 10:00:01: the just-closed 09:55 bar must not
+        # trigger yet. A caught-up feed at the same clock does trigger on it.
+        cutoff = datetime.datetime(2026, 10, 26, 10, 0, 1, tzinfo=scan.upstox_mod.IST)
+        entries = [{"symbol": "RELIANCE", "instrument_key": KEY}]
+        self_rows = self.rows_of
+
+        class Lagging:
+            def intraday(self, instrument_key, interval="1m"):
+                return self_rows("2026-10-26T10:00")
+
+        class Fresh:
+            def intraday(self, instrument_key, interval="1m"):
+                return self_rows(None)
+
+        hits, _ = scan.scan_orb(Fresh(), entries, datetime.date(2026, 10, 26), cutoff, 15,
+                                settle=lambda bs: scan.settled_cutoff(bs, cutoff))
+        self.assertEqual([h["symbol"] for h in hits], ["RELIANCE"])
+        hits, _ = scan.scan_orb(Lagging(), entries, datetime.date(2026, 10, 26), cutoff, 15,
+                                settle=lambda bs: scan.settled_cutoff(bs, cutoff))
+        self.assertEqual(hits, [])
+
+    def test_offline_replays_keep_the_old_cutoff_behaviour(self):
+        # --offline runs are replays of history: no settling, no new drops
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        uni = write_universe(os.path.join(tmp, "universe.txt"))
+        out = os.path.join(tmp, "watchlist.json")
+        code, out_text, err = run(["orb", "--universe", uni, "--out", out,
+                                   "--offline", ORB_FILE, "--no-write", "--json",
+                                   "--symbols", "RELIANCE", "--now", "2026-10-26 10:30"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out_text)["symbols"][0]["orb"]["price"], 1193.6)
+
+
+class CalendarWarning(unittest.TestCase):
+    """Upstream #2.7: a date past the holiday table's last covered year is a
+    weekend-only check; the scan says so instead of silently trusting it."""
+
+    def test_warning_names_the_covered_years_and_where_to_check(self):
+        text = scan.calendar_warning(datetime.date(2027, 3, 2))
+        self.assertIn("2026", text)
+        self.assertIn("nseindia.com", text)
+        self.assertIn("weekend", text)
+
+    def test_no_warning_inside_the_covered_years(self):
+        self.assertIsNone(scan.calendar_warning(datetime.date(2026, 10, 26)))
+        self.assertIsNone(scan.calendar_warning(datetime.date(2026, 1, 1)))
+
+    def test_empty_holiday_table_never_warns(self):
+        orig = scan.cal.load_holidays
+        scan.cal.load_holidays = lambda path=None: {}
+        try:
+            self.assertIsNone(scan.calendar_warning(datetime.date(2027, 3, 2)))
+        finally:
+            scan.cal.load_holidays = orig
+
+    def test_daily_carries_the_warning_past_the_calendar(self):
+        # json consumers read the field, humans read the printed line
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        code, out_text, err = run(["daily", "--symbols", "RELIANCE", "--out",
+                                   os.path.join(tmp, "w.json"),
+                                   "--now", "2027-03-02 18:30", "--no-write", "--json"] + BAVS_LIST)
+        self.assertEqual(json.loads(out_text)["calendar_note"],
+                         "warning: the NSE holiday list covers 2026 only: dates after "
+                         "2026-12-31 are checked for weekends, not holidays; check nseindia.com")
+        argv = ["daily", "--symbols", "RELIANCE", "--out", os.path.join(tmp, "w2.json"),
+                "--now", "2027-03-02 18:30", "--no-write", "--quiet"] + BAVS_LIST
+        code, out_text, err = run(argv)
+        self.assertIn("warning: the NSE holiday list covers 2026 only", out_text)
 
 
 class CrossCutting(unittest.TestCase):

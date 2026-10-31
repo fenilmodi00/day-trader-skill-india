@@ -14,21 +14,25 @@ Clock, all IST: pre-open bell 09:00, open bell 09:15, flat-by 15:10 (the
 config session.flat_by), close bell 15:30. Weekends and NSE holidays ring
 nothing and the check says the market is closed. A bell rings at its time
 or at the first check after it, never before it: 09:14 does not ring the
-open bell.
+open bell. A date past the holiday table's last covered year draws a
+one-line warning.
 
 Quotes: Upstox batch quotes through trader_core.upstox.Client (LTP, OHLC).
 A check with no price rules never touches the network. A missing quote is
 reported ("no quote for RELIANCE"), never guessed; an expired token asks
-you to re-authenticate.
+you to re-authenticate. A quote whose LTP is not a finite number is
+dropped with one line; the rest of the batch still runs.
 
 Once-only firing: every ring is recorded under trader/state/alerts.json,
 keyed by symbol, alert kind and the IST date, so the next session re-arms
-everything automatically.
+everything automatically. Re-adding a rule clears its recorded ring,
+arming it again at once.
 """
 
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import sys
@@ -180,6 +184,17 @@ def cmd_add(args):
         else:
             rules.append(rule)
     _write_json(args.rules, doc)
+    # a re-added rule starts armed: drop its seen entries so it can ring again
+    # today. Seen keys are "symbol|kind|id|date"; fork ids never contain "|",
+    # so segment 2 is the rule id.
+    ids = {str(r.get("id")) for r in new_rules}
+    cfg = config.load(args.config)
+    state = config.state_read(cfg, STATE_FILE)
+    seen = state.get("seen") if isinstance(state, dict) else None
+    if isinstance(seen, dict) and seen:
+        kept = {k: v for k, v in seen.items() if str(k).split("|")[2] not in ids}
+        if kept != seen:
+            config.state_write(cfg, STATE_FILE, dict(state, seen=kept))
     for rule in new_rules:
         print("added %s" % rule["id"])
     return 0
@@ -203,6 +218,39 @@ def _quote_key(rule):
     return rule.get("instrument_key") or None
 
 
+def _price(value):
+    """A strict price: a finite JSON number. Bools, NaN/inf and non-numbers
+    ("n/a", strings, lists, dicts) are not prices."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def _clean_quotes(quotes):
+    """Sanitize a batch quote answer. Fields that are not finite numbers
+    degrade to None; a quote without a real LTP is dropped with its one
+    line and the rest of the batch continues. Returns (quotes, keys whose
+    quote was dropped, one-line errors)."""
+    out, bad, errors = {}, set(), []
+    for key, bar in (quotes or {}).items():
+        label = str(key)
+        if not isinstance(bar, dict):
+            errors.append("%s: quote is not a JSON object, dropped" % label)
+            bad.add(key)
+            continue
+        clean = dict(bar)
+        for field in ("ltp", "open", "high", "low", "close", "prev_close", "volume"):
+            if clean.get(field) is not None:
+                clean[field] = _price(clean[field])
+        if clean.get("ltp") is None:
+            errors.append("%s is not a number: the quote was dropped" % label)
+            bad.add(key)
+            continue
+        out[key] = clean
+    return out, bad, errors
+
+
 def cmd_check(args, source=None):
     cfg = config.load(args.config)
     now = timeutil.to_ist(timeutil.parse_ist(args.now) if args.now else timeutil.now_ist())
@@ -211,17 +259,22 @@ def cmd_check(args, source=None):
     state = config.state_read(cfg, STATE_FILE, {"seen": {}})
     seen = state["seen"] if isinstance(state.get("seen"), dict) else {}
     flat_default = config.session_times(cfg)["flat_by"].strftime("%H:%M")
+    holidays = cal.load_holidays()
     trading = cal.is_trading_day(now.date())
     closed_note = None
     if not trading and any(r.get("type") in ("bell", "flat_by") for r in rules):
-        why = cal.load_holidays().get(day) or ("weekend" if cal.is_weekend(now.date()) else "closed")
+        why = holidays.get(day) or ("weekend" if cal.is_weekend(now.date()) else "closed")
         closed_note = "NSE closed today (%s): no bells, no flat-by" % why
+    cal_note = None
+    years = sorted({int(d[:4]) for d in holidays})
+    if years and now.date().year > years[-1]:
+        span = str(years[0]) if years[0] == years[-1] else "%d and %d" % (years[0], years[-1])
+        cal_note = "the NSE holiday list covers %s only: check nseindia.com for this date" % span
 
     fired, pending, missing, errors = [], [], [], []
 
     # one batch quote for every price rule that is live today
     quotes = {}
-    price_rules = []
     keys = []
     for rule in rules:
         if rule.get("type") in PRICE_KINDS and not (rule.get("date") and rule["date"] != day):
@@ -234,13 +287,12 @@ def cmd_check(args, source=None):
                                   % rule["symbol"])
                     continue
                 rule["_qkey"] = None
-                price_rules.append(rule)
                 continue
             rule["_qkey"] = qkey
-            price_rules.append(rule)
             if qkey not in keys:
                 keys.append(qkey)
     quote_failed = False
+    bad_keys = set()
     if keys:
         try:
             src = source if source is not None else Client(cfg)
@@ -252,9 +304,14 @@ def cmd_check(args, source=None):
         except (UpstoxError, OSError) as exc:
             quote_failed = True
             errors.append("quote request failed: %s" % exc)
+        if not quote_failed:
+            quotes, bad_keys, quote_errors = _clean_quotes(quotes)
+            errors.extend(quote_errors)
 
     if closed_note:
         pending.append({"kind": "closed", "detail": closed_note})
+    if cal_note:
+        pending.append({"kind": "calendar", "detail": cal_note})
     for rule in rules:
         kind = rule.get("type")
         rid = str(rule.get("id") or kind)
@@ -298,8 +355,8 @@ def cmd_check(args, source=None):
             else:
                 pending.append({"id": rid, "kind": kind, "at": at_text})
         elif kind in PRICE_KINDS:
-            if quote_failed:
-                continue
+            if quote_failed or rule.get("_qkey") in bad_keys:
+                continue  # its one line is already on the error list
             if rule.get("price") is None:
                 errors.append("%s: the rule carries no price" % rid)
                 continue
@@ -321,7 +378,11 @@ def cmd_check(args, source=None):
         else:
             errors.append("%s: unknown rule type %r" % (rid, kind))
 
-    config.state_write(cfg, STATE_FILE, {"seen": seen})
+    write_error = None
+    try:
+        config.state_write(cfg, STATE_FILE, {"seen": seen})
+    except OSError as exc:
+        write_error = "could not write %s: %s" % (STATE_FILE, exc)
     result = {"now": timeutil.fmt_ist(now), "fired": fired, "pending": pending,
               "missing": missing, "errors": errors}
     if args.json:
@@ -329,6 +390,8 @@ def cmd_check(args, source=None):
     else:
         if closed_note:
             print(closed_note)
+        if cal_note:
+            print(cal_note)
         for f in fired:
             what = f.get("symbol") or f.get("bell") or f.get("label") or ""
             print("RING %s %s at %s" % (f["id"], what, f["at"]))
@@ -336,6 +399,9 @@ def cmd_check(args, source=None):
             print(m["detail"])
     for err in errors:
         print("%s: %s" % (SKILL, err), file=sys.stderr)
+    if write_error:
+        print("%s: %s" % (SKILL, write_error), file=sys.stderr)
+        return 1
     return 2 if errors else 0
 
 
@@ -394,12 +460,12 @@ def main(argv=None, source=None):
         if args.cmd == "plan":
             return cmd_plan(args)
         return cmd_check(args, source)
-    except ConfigError as exc:
+    except (ConfigError, ValueError) as exc:
         print("%s: %s" % (SKILL, exc), file=sys.stderr)
         return 2
-    except ValueError as exc:
-        print("%s: %s" % (SKILL, exc), file=sys.stderr)
-        return 2
+    except Exception as exc:
+        print("%s: unexpected %s: %s" % (SKILL, type(exc).__name__, exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

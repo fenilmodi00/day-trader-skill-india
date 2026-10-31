@@ -28,6 +28,7 @@ from trader_core import calendar as cal  # noqa: E402
 from trader_core import config as cfgmod  # noqa: E402
 from trader_core import instruments as instruments_mod  # noqa: E402
 from trader_core import upstox as upstox_mod  # noqa: E402
+from trader_core.http import UpstoxRateLimit, retry_after  # noqa: E402
 from trader_core.timeutil import (day_or_none, fmt_ist, hhmm_or_none, now_ist, parse_ist,  # noqa: E402
                                   session_dt)
 
@@ -103,10 +104,117 @@ def parse_day(text, flag="--date"):
     return day
 
 
+# ---------------------------------------------------------------- rate limiting
+
+RATE_LIMIT_STRIKES = 3      # consecutive batches ending in 429 before the scan stops
+
+
+def rate_limited(exc):
+    """True when the exception is a rate-limit answer (Upstox 429 or NSE HTTP 429)."""
+    if isinstance(exc, UpstoxRateLimit):
+        return True
+    return isinstance(exc, urllib.error.HTTPError) and exc.code == 429
+
+
+def sleep_retry_after(exc):
+    """Honour a 429's Retry-After header (capped at RETRY_AFTER_CAP); None means
+    the response carried no usable header. Never sleeps past the cap."""
+    seconds = retry_after(getattr(exc, "headers", None))
+    if seconds is None:
+        return None
+    if seconds > 0:
+        time.sleep(seconds)
+    return seconds
+
+
+class RateLimitBreaker:
+    """3-strike breaker over per-batch work: three consecutive batches that end
+    in HTTP 429 mean the data host is pushing back, so stop and report what was
+    fetched instead of sending thousands more requests. One non-429 batch resets
+    the strikes: a single stray limit is not a shutdown."""
+
+    def __init__(self, limit=RATE_LIMIT_STRIKES):
+        self.limit = limit
+        self.strikes = 0
+        self.tripped = False
+
+    def record(self, limited):
+        """Call once per batch with the batch's rate-limit outcome."""
+        self.strikes = self.strikes + 1 if limited else 0
+        if limited and self.strikes >= self.limit:
+            self.tripped = True
+        return self.tripped
+
+
+def partial_doc(doc, breaker):
+    """Stamp PARTIAL output onto a scan doc when the breaker tripped: the scan
+    kept what it fetched and says so, both for the JSON consumer (partial field)
+    and the reader (PARTIAL line)."""
+    if not breaker.tripped:
+        return doc
+    doc["partial"] = True
+    doc["note"] = ("PARTIAL: the data host rate-limited %d batch(es) in a row, the scan "
+                   "stopped early and kept what it fetched. Re-run when the limit clears."
+                   % breaker.limit) + " " + NOTE
+    return doc
+
+
+def print_partial(a, breaker):
+    if breaker.tripped:
+        progress(a, "PARTIAL: the data host kept answering HTTP 429 (%d batch(es) in a row); "
+                    "the scan stopped early and kept what it fetched. Re-run when the limit "
+                    "clears." % breaker.limit)
+
+
+# ---------------------------------------------------------------- bar settling
+
+SETTLE_GRACE = 60           # seconds a feed may lag its own last trade before bars drop
+
+
+def settled_cutoff(bars, now=None, grace=SETTLE_GRACE):
+    """The clock a 5m bar must have closed by to count: the feed's own last-trade
+    time (the newest candle it sent) catches up to `now` before the newest bar
+    is believed complete, capped at `grace` seconds of settle. Without it a
+    feed that is a few seconds behind would have its in-progress bar treated as
+    closed. Returns None when nothing is settled yet."""
+    now = now or now_ist()
+    if not bars:
+        return None
+    data_time = max(b["dt"] for b in bars if isinstance(b.get("dt"), datetime.datetime))
+    caught_up = data_time >= now - datetime.timedelta(seconds=grace)
+    return now if caught_up else min(now, data_time)
+
+
+# ---------------------------------------------------------------- calendar note
+
+def calendar_warning(day):
+    """One-line warning when a scanned date is past the NSE holiday table's last
+    covered year: beyond it a weekday can look open because the holiday is unknown."""
+    years = sorted({int(d[:4]) for d in cal.load_holidays()})
+    if not years or day.year <= years[-1]:
+        return None
+    span = str(years[0]) if years[0] == years[-1] else "%d and %d" % (years[0], years[-1])
+    return ("warning: the NSE holiday list covers %s only: dates after %d-12-31 are checked "
+            "for weekends, not holidays; check nseindia.com" % (span, years[-1]))
+
+
 def http_get(url, timeout=30):
+    """NSE GET -> text. HTTP errors raise (a 429 carries its response headers so
+    the breaker can honour Retry-After); body decoding never fails the scan."""
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
+
+
+def _http_error(url, exc):
+    """An urllib failure -> ScanError; HTTP 429 honours its capped Retry-After first."""
+    if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+        waited = sleep_retry_after(exc)
+        note = ("waited %.0fs for its Retry-After" % waited) if waited is not None \
+            else "no usable Retry-After header"
+        return ScanError("NSE rate-limited %s (HTTP 429, %s): run the scan again in a few minutes."
+                         % (url, note))
+    return ScanError("could not download %s: %s" % (url, exc))
 
 
 def progress(a, msg):
@@ -265,37 +373,50 @@ def fetch_bhavcopy(day):
     if isinstance(last, urllib.error.HTTPError) and last.code == 404:
         raise ScanError("NSE returned 404 for %s: the bhavcopy is not published yet (usually "
                         "by 06:00 PM IST on a trading day), or the date is wrong." % fname)
-    raise ScanError("could not download %s: %s" % (fname, getattr(last, "reason", last) or last))
+    raise _http_error(fname, last) from last
 
 
-def live_sessions(day, cache_dir, fetch=None):
+def live_sessions(day, cache_dir, fetch=None, breaker=None):
     """The last SESSIONS_NEEDED trading sessions up to and including day, for
     the live daily scan. Each bhavcopy is cached under cache_dir and only the
     missing days are downloaded, so the documented 20-day rules can fire; a
     prior day NSE cannot serve is left out and sessions_supplied says so, the
-    scan day itself must be there."""
+    scan day itself must be there. `breaker` (a RateLimitBreaker) stops the
+    download loop after three consecutive rate-limited fetches and the scan
+    reports PARTIAL with the sessions it did get."""
     fetch = fetch or fetch_bhavcopy
     anchor = day
     while not cal.is_trading_day(anchor):
         anchor -= datetime.timedelta(days=1)
     wanted = cal.trading_days(anchor - datetime.timedelta(days=60), anchor)[-SESSIONS_NEEDED:]
     sessions = []
+    stopped = False
     for wanted_day in wanted:
         path = os.path.join(cache_dir,
                             "sec_bhavdata_full_%s.csv" % wanted_day.strftime("%d%m%Y"))
         if not os.path.exists(path):
+            if stopped:
+                continue  # the breaker tripped: keep the cache, stop downloading
             try:
                 text, fname = fetch(wanted_day)
-            except ScanError:
+            except (ScanError, urllib.error.HTTPError) as e:
                 if wanted_day == anchor:
                     raise
+                if breaker is not None and breaker.record(rate_limited(e.__cause__ or e)):
+                    stopped = True
                 continue
             if not os.path.isdir(cache_dir):
                 os.makedirs(cache_dir)
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(text)
         sessions.append(read_bhav_file(path))
-    if not sessions:
+    if not any(d == anchor for d, _ in sessions):
+        # the scan day itself must be there: better no scan than stale closes
+        if breaker is not None and breaker.tripped:
+            raise ScanError("NSE rate-limited the bhavcopy download (%d batches in a row) and no "
+                            "session for %s was fetched; the scan will not run on stale closes. "
+                            "Re-run when the limit clears."
+                            % (breaker.limit, anchor.isoformat()))
         raise ScanError("no bhavcopy for %s in %s or from NSE" % (day.isoformat(), cache_dir))
     return sessions
 
@@ -386,7 +507,7 @@ def load_master(a, cfg=None, live=False):
         try:
             return upstox_mod.Client(cfg or {}).instruments("NSE")
         except upstox_mod.UpstoxError as e:
-            raise ScanError("cannot download the Upstox instrument master: %s" % e)
+            raise ScanError("cannot download the Upstox instrument master: %s" % e) from e
     return None
 
 
@@ -529,13 +650,13 @@ class OfflineSource:
     def _transport(self, method, url, payload=None, headers=None, timeout=30):
         for key, rows in self.rows.items():
             if key != "__envelope__" and urllib.parse.quote(key, safe="") in url:
-                return 200, json.dumps({"status": "success", "data": {"candles": rows}})
+                return 200, json.dumps({"status": "success", "data": {"candles": rows}}), {}
         envelope = self.rows.get("__envelope__")
         if envelope is not None:
-            return 200, json.dumps({"status": "success", "data": {"candles": envelope}})
+            return 200, json.dumps({"status": "success", "data": {"candles": envelope}}), {}
         return 200, json.dumps({"status": "error", "errorCode": "UDAPI100098",
                                 "message": "no recorded intraday bars for this instrument "
-                                           "in the offline fixture"})
+                                           "in the offline fixture"}), {}
 
     def intraday(self, instrument_key, interval="1m"):
         return self.client.intraday(instrument_key, "1m")
@@ -616,9 +737,12 @@ def _as_bars(rows):
     return out
 
 
-def scan_orb(source, entries, day, cutoff, or_minutes):
+def scan_orb(source, entries, day, cutoff, or_minutes, breaker=None, settle=None):
     """entries [{symbol, instrument_key}]. Bars are Upstox 1m candles resampled to
-    the 5m grid; with a cutoff only bars complete at it count.
+    the 5m grid; with a cutoff only bars complete at it count. `settle` (default
+    None) is a settled clock function applied to each symbol's bars; `breaker` is
+    the shared RateLimitBreaker: three consecutive rate-limited symbol batches
+    stop the scan and what was fetched is reported as PARTIAL.
     Returns (hit entries, skipped {symbol: why})."""
     first_close = session_dt(day, OPEN) + datetime.timedelta(minutes=or_minutes)
     hits, skipped = [], {}
@@ -632,6 +756,8 @@ def scan_orb(source, entries, day, cutoff, or_minutes):
             bars = upstox_mod.resample(_as_bars(source.intraday(key, "1m")), BAR_MIN)
         except upstox_mod.UpstoxError as e:
             skipped[sym] = str(e)
+            if breaker is not None and breaker.record(rate_limited(e)):
+                break
             continue
         day_bars = [b for b in bars if b["dt"].date() == day]
         if not day_bars:
@@ -642,8 +768,9 @@ def scan_orb(source, entries, day, cutoff, or_minutes):
                 skipped[sym] = ("waiting: the %d-minute opening range is not complete at %s"
                                 % (or_minutes, fmt_ist(cutoff)))
                 continue
+            effective = cutoff if settle is None else min(cutoff, settle(day_bars) or cutoff)
             day_bars = [b for b in day_bars
-                        if b["dt"] + datetime.timedelta(minutes=BAR_MIN) <= cutoff]
+                        if b["dt"] + datetime.timedelta(minutes=BAR_MIN) <= effective]
         hit = orb_first(day_bars, or_minutes)
         if hit:
             hits.append({"symbol": sym, "instrument_key": key, "orb": hit})
@@ -867,7 +994,9 @@ def cmd_universe(a, source=None):
 def cmd_daily(a, source=None, fetch=None):
     now = parse_ist(a.now) if a.now else now_ist()
     day = parse_day(a.date) if a.date else now.date()
+    cal_note = calendar_warning(day)
     cfg = cfgmod.load(a.config)
+    breaker = RateLimitBreaker()
     if a.bhavcopy:
         sessions = load_bhav(a.bhavcopy)
         doc_source = "nse-bhavcopy-offline"
@@ -876,7 +1005,7 @@ def cmd_daily(a, source=None, fetch=None):
         doc_source = "nse-bhavcopy-offline"
     else:
         cache_dir = a.bhavcopy_dir or os.path.join(cfgmod.state_dir(cfg), "bhavcopy")
-        sessions = live_sessions(day, cache_dir, fetch)
+        sessions = live_sessions(day, cache_dir, fetch, breaker=breaker)
         doc_source = "nse-bhavcopy"
     if a.symbols:
         names = [s for s in re.split(r"[,\s]+", a.symbols.upper()) if s]
@@ -898,13 +1027,19 @@ def cmd_daily(a, source=None, fetch=None):
            "universe": counts["universe"], "scanned": counts["scanned"],
            "failed": counts["no_data"], "note": NOTE, "count": len(entries),
            "symbols": entries}
+    if cal_note:
+        doc["calendar_note"] = cal_note
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/\\"))
+    partial_doc(doc, breaker)
     if not a.no_write:
         write_json(a.out, doc)
     if a.json:
         print(json.dumps(doc, indent=2))
     else:
+        print_partial(a, breaker)
+        if cal_note:
+            print(cal_note)
         short = "" if counts["sessions_supplied"] >= SESSIONS_NEEDED else (
             " Only %d session(s) supplied: the 20-day statistics use the available window "
             "(full rules need %d sessions)." % (counts["sessions_supplied"], SESSIONS_NEEDED))
@@ -935,6 +1070,8 @@ def cmd_orb(a, source=None):
     if a.or_minutes < BAR_MIN or a.or_minutes % BAR_MIN or a.or_minutes > 120:
         raise ScanError("--or-minutes wants a multiple of 5 from 5 to 120 (15 is the classic)")
     offline = bool(a.offline)
+    breaker = RateLimitBreaker()
+    live = not offline and source is None
     if offline:
         doc, days, envelope = load_offline(a.offline)
         if envelope and (a.symbols or "").count(",") and len([s for s in re.split(r"[,\s]+", a.symbols.upper()) if s]) > 1:
@@ -949,13 +1086,17 @@ def cmd_orb(a, source=None):
         day = now.date()
         cutoff = orb_window(now, at, a.or_minutes, day)
         doc_source = "upstox-intraday"
+    cal_note = calendar_warning(day)
+    if cal_note:
+        progress(a, cal_note)
     entries, base = read_entries(a)
     if offline and envelope and len(entries) > 1:
         raise ScanError("the offline file is one instrument's candles: pass --symbols with one symbol")
     if entries and not any(e.get("instrument_key") for e in entries):
         raise ScanError("no instrument_key for %s: run `scan.py universe --write` first, or "
                         "pass --universe" % ", ".join(e["symbol"] for e in entries))
-    hits, skipped = scan_orb(src, entries, day, cutoff, a.or_minutes)
+    hits, skipped = scan_orb(src, entries, day, cutoff, a.or_minutes, breaker=breaker,
+                             settle=(lambda bars: settled_cutoff(bars, now)) if live else None)
     if skipped and not hits and len(skipped) == len(entries):
         raise ScanError("; ".join("%s: %s" % (s, w) for s, w in sorted(skipped.items())))
     if source is not None:
@@ -980,13 +1121,19 @@ def cmd_orb(a, source=None):
            "universe": len(entries), "scanned": len(entries) - len(skipped),
            "failed": len(skipped), "status": status, "note": NOTE,
            "count": len(symbols), "symbols": symbols, "skipped": skipped}
+    if cal_note:
+        doc["calendar_note"] = cal_note
     if offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/\\"))
+    partial_doc(doc, breaker)
     if not a.no_write:
         write_json(a.out, doc)
     if a.json:
         print(json.dumps(doc, indent=2))
     else:
+        print_partial(a, breaker)
+        if cal_note:
+            print(cal_note)
         print("Opening-range breakout scan for %s (NSE, Upstox 1m resampled to 5m): "
               "%d-minute range 09:15 to %s, cutoff %s."
               % (day.isoformat(), a.or_minutes,

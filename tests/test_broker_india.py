@@ -123,6 +123,51 @@ def run_cli(mod, argv, source=None):
     return code, out.getvalue(), err.getvalue()
 
 
+class ParseYes(unittest.TestCase):
+    ORDER = {"symbol": "RELIANCE", "side": "BUY", "quantity": 25, "order_type": "LIMIT",
+             "price": 1193.6, "kind": "entry"}
+    BATCH = ("RELIANCE", "HDFCBANK", "ICICIBANK")
+
+    def yes(self, reply, order=None, batch=BATCH):
+        return ticket.parse_yes(reply, order or self.ORDER, batch)[0]
+
+    def test_a_batch_yes_is_refused_by_symbol(self):
+        self.assertFalse(self.yes("yes HDFCBANK"))            # another order in the batch
+        self.assertIn("names HDFCBANK, but this order is for RELIANCE",
+                      ticket.parse_yes("yes HDFCBANK", self.ORDER, self.BATCH)[1])
+        self.assertTrue(self.yes("yes INFY"))                 # not in the batch: not checked
+        self.assertTrue(self.yes("yes HDFCBANK", batch=["RELIANCE"]))
+        self.assertTrue(self.yes("yes buy 25 RELIANCE"))
+
+    def test_case_and_punctuation_are_forgiving(self):
+        self.assertFalse(self.yes("Yes, buy hdfcbank instead"))
+        self.assertFalse(self.yes("yes ICICIBANK"))
+
+
+class OrderHash(unittest.TestCase):
+    def plan(self):
+        return rel_plan()
+
+    def test_the_hash_covers_the_plans_leg_levels(self):
+        o = ticket.entry_order(self.plan())
+        base = ticket.order_hash(o)
+        for leg, field, value in ((1, "trigger_price", 1184.0), (2, "price", 1210.0)):
+            edited = rel_plan()
+            edited["legs"][leg][field] = value
+            self.assertNotEqual(ticket.order_hash(ticket.entry_order(edited)), base,
+                                "leg %d %s" % (leg, field))
+        # a string price is the same level as its float
+        as_str = rel_plan()
+        as_str["legs"][0]["price"] = "1193.6"
+        self.assertEqual(ticket.order_hash(ticket.entry_order(as_str)), base)
+
+    def test_a_hash_matches_itself_across_constructions(self):
+        plan = self.plan()
+        o = ticket.entry_order(plan)
+        self.assertEqual(ticket.order_hash(o), ticket.order_hash(ticket.entry_order(plan)))
+        self.assertNotEqual(ticket.order_hash(ticket.flatten_order(plan)), ticket.order_hash(o))
+
+
 class BrokerIndiaTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dt-t8-broker-")
@@ -142,6 +187,7 @@ class BrokerIndiaTests(unittest.TestCase):
         self.assertEqual(res["verdict"], "PASS", res["reasons"])
         doc = dict(res)
         doc["generated_at"] = parse_ist(NOW).replace(microsecond=0).isoformat()
+        doc["valid_until"] = res["valid_until"]  # 10:15 IST: 15 minutes from the check
         with open(self.risk_path, "w", encoding="utf-8") as fh:
             json.dump(doc, fh)
         return res
@@ -219,6 +265,48 @@ class BrokerIndiaTests(unittest.TestCase):
         # execute gate 1 fails
         code, out, err = run_cli(ticket, ["execute"] + self.common())
         self.assertEqual(code, 2)
+
+    def test_an_edited_stop_level_is_not_ready(self):
+        # the order hash covers the plan's leg prices: editing plan.stop voids a READY ticket
+        self.risk_pass()
+        code, out, _ = run_cli(ticket, ["show"] + self.common())
+        self.assertEqual(code, 0, out)
+        plan = json.load(open(self.plan_path))
+        plan["legs"][1]["trigger_price"] = 1184.0
+        with open(self.plan_path, "w", encoding="utf-8") as fh:
+            json.dump(plan, fh)
+        code, out, err = run_cli(ticket, ["show"] + self.common())
+        self.assertNotEqual(code, 0)
+        self.assertIn("NOT READY", out + err)
+        self.assertIn("different order", out + err)
+        code, _, err = run_cli(ticket, ["approve", "--yes", "yes buy 25 RELIANCE"] + self.common())
+        self.assertEqual(code, 2)
+        self.assertIn("gate 1", err)
+
+    # --- gate 1 expiry (valid_until) ---
+    def test_the_pass_expires_and_show_refuses(self):
+        self.risk_pass()  # stamped at 10:00, valid_until 10:15
+        code, out, _ = run_cli(ticket, ["show"] + self.common() + ["--now", "2026-10-26 10:14"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("READY", out)
+        code, out, err = run_cli(ticket, ["show"] + self.common() + ["--now", "2026-10-26 10:16"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("NOT READY", out + err)
+        self.assertIn("the PASS expired at 10:15 IST; run trader-risk check.py again", out + err)
+
+    def test_an_expired_pass_refuses_approve_and_execute(self):
+        self.risk_pass()
+        code, _, err = run_cli(ticket, ["approve", "--yes", "yes buy 25 RELIANCE"]
+                               + self.common() + ["--now", "2026-10-26 10:16"])
+        self.assertEqual(code, 2)
+        self.assertIn("expired", err)
+        # approve inside the window, then execute after valid_until: gate 1 refuses again
+        code, _, err = run_cli(ticket, ["approve", "--yes", "yes buy 25 RELIANCE"]
+                               + self.common() + ["--now", "2026-10-26 10:14"])
+        self.assertEqual(code, 0, err)
+        code, _, err = run_cli(ticket, ["execute"] + self.common() + ["--now", "2026-10-26 10:16"])
+        self.assertEqual(code, 2)
+        self.assertIn("expired", err)
 
     # --- sandbox default ---
     def test_sandbox_host_used_by_default(self):

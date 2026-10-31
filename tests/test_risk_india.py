@@ -410,6 +410,68 @@ class Duplicate(unittest.TestCase):
         self.assertEqual(verdict(res), "PASS", reasons(res))
 
 
+class UnresolvedApprovals(unittest.TestCase):
+    def approval(self, **over):
+        rec = {"at": "2026-10-26T09:55:00+05:30", "date": MON, "status": "approved",
+               "kind": "entry", "side": "BUY", "symbol": "RELIANCE", "tag": "dt-entry-orb",
+               "qty": 25, "price": 1193.6, "order_hash": "fp-entry",
+               "plain": "BUY 25 RELIANCE, limit Rs 1,193.60, product I"}
+        rec.update(over)
+        return rec
+
+    def test_approval_with_no_result_warns_and_counts(self):
+        state = {"orders": [self.approval()]}
+        res = risk.check(rel_plan(), base_cfg(), now=NOW, record=state, instrument=REL)
+        self.assertIn("has no result recorded: run ticket.py result, or check get_order_book",
+                      " | ".join(res["warnings"]))
+        self.assertEqual(res["checks"]["unresolved_approvals"], "1 approval(s) with no result recorded")
+        # it counts toward the orders-per-day limit
+        cfg = base_cfg(max_orders_per_day=1)
+        res = risk.check(rel_plan(), cfg, now=NOW, record=state, instrument=REL)
+        self.assertEqual(verdict(res), "BLOCK", reasons(res))
+        self.assertIn("orders recorded today", reasons(res))
+        # and toward the trades-per-day limit
+        cfg = base_cfg(max_trades_per_day=1)
+        res = risk.check(rel_plan(), cfg, now=NOW, record=state, instrument=REL)
+        self.assertEqual(verdict(res), "BLOCK", reasons(res))
+        self.assertIn("entries recorded today", reasons(res))
+
+    def test_a_later_result_clears_the_approval(self):
+        appr = self.approval()
+        for status in ("placed", "failed"):
+            state = {"orders": [appr, self.approval(status=status, at="2026-10-26T10:05:00+05:30")]}
+            res = risk.check(rel_plan(), base_cfg(), now=NOW, record=state, instrument=REL)
+            self.assertEqual(res["warnings"], [], status)
+            self.assertEqual(res["checks"]["unresolved_approvals"], "none")
+
+    def test_a_result_for_another_hash_or_day_does_not_clear_it(self):
+        appr = self.approval()
+        other = self.approval(status="placed", order_hash="fp-other", at="2026-10-26T10:05:00+05:30")
+        res = risk.check(rel_plan(), base_cfg(), now=NOW, record={"orders": [appr, other]},
+                         instrument=REL)
+        self.assertEqual(len(res["warnings"]), 1)
+        yesterday = self.approval(status="placed", at="2026-10-25T10:05:00+05:30")
+        del yesterday["date"]
+        yesterday["date"] = "2026-10-25"
+        res = risk.check(rel_plan(), base_cfg(), now=NOW, record={"orders": [appr, yesterday]},
+                         instrument=REL)
+        self.assertEqual(len(res["warnings"]), 1)
+
+    def test_helper_matches_check_counting(self):
+        # the fp-entry approval is resolved by its later failed record; fp-2 stays open
+        state = {"orders": [self.approval(), self.approval(status="failed",
+                                                           at="2026-10-26T10:05:00+05:30"),
+                            self.approval(order_hash="fp-2",
+                                          at="2026-10-26T10:06:00+05:30")]}
+        self.assertEqual(len(risk.unresolved_approvals(state, MON)), 1)
+        state = {"orders": [self.approval(), self.approval(status="failed",
+                                                           at="2026-10-26T10:05:00+05:30"),
+                            self.approval(order_hash="fp-2"),
+                            self.approval(order_hash="fp-2", status="placed",
+                                          at="2026-10-26T10:07:00+05:30")]}
+        self.assertEqual(len(risk.unresolved_approvals(state, MON)), 0)
+
+
 class ChargesAdjusted(unittest.TestCase):
     def test_charges_push_loss_over_cap(self):
         # gross loss 248.75 fits 250, but the net loss 294.28 (charges 45.53) does not
@@ -488,6 +550,22 @@ class Closure(unittest.TestCase):
         self.assertEqual(verdict(res), "BLOCK")
         self.assertTrue(any("2026-10-20" in r and "Dussehra" in r for r in res["reasons"]),
                         reasons(res))
+
+
+class ValidUntil(unittest.TestCase):
+    def test_fifteen_minutes_from_the_check(self):
+        res = risk.check(rel_plan(), base_cfg(), now=NOW, instrument=REL)
+        self.assertEqual(res["valid_until"], "2026-10-26 10:15 IST")
+
+    def test_never_past_the_entry_cutoff(self):
+        res = risk.check(rel_plan(), base_cfg(), now=parse_ist("2026-10-26 14:56"),
+                         instrument=REL)
+        self.assertEqual(res["valid_until"], "2026-10-26 15:00 IST")
+
+    def test_stamp_is_aware_ist_parseable(self):
+        res = risk.check(rel_plan(), base_cfg(), now=NOW, instrument=REL)
+        self.assertEqual(parse_ist(res["valid_until"]),
+                         parse_ist("2026-10-26 10:15"))
 
 
 class OrdersPerDay(unittest.TestCase):

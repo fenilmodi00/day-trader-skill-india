@@ -10,7 +10,8 @@ from trader_core import CLOSE, IST, OPEN
 from trader_core import config as cfgmod
 from trader_core.datasource import DataSource
 from trader_core.http import (LIVE, SANDBOX, SandboxUnsupported, UpstoxAPIError, UpstoxAuthError,
-                              UpstoxError, default_transport, raise_for_response)
+                              UpstoxError, UpstoxRateLimit, default_transport, raise_for_response,
+                              retry_after)
 from trader_core import instruments as instruments_mod
 
 QUOTE_CHUNK = 500
@@ -229,9 +230,17 @@ class Client(DataSource):
         if purpose:
             headers["Authorization"] = "Bearer " + self._token(purpose)
         self._throttle()
-        status, body = self._transport(method, url, payload=payload, headers=headers,
-                                       timeout=self._timeout)
-        raise_for_response(status, body)
+        result = self._transport(method, url, payload=payload, headers=headers,
+                                 timeout=self._timeout)
+        # transports may return (status, body) or (status, body, response_headers)
+        status, body = result[0], result[1]
+        resp_headers = result[2] if len(result) > 2 else {}
+        try:
+            raise_for_response(status, body, resp_headers)
+        except UpstoxError as e:
+            if isinstance(e, UpstoxRateLimit):
+                e.retry_after = retry_after(resp_headers)
+            raise
         if not body:
             return {}
         try:
@@ -329,9 +338,10 @@ class Client(DataSource):
                     return rows
             except (OSError, ValueError):
                 pass
-        status, body = self._transport("GET", INSTRUMENT_MASTER_URL % exchange, payload=None,
-                                       headers={"Accept": "application/gzip"},
-                                       timeout=self._timeout)
+        result = self._transport("GET", INSTRUMENT_MASTER_URL % exchange, payload=None,
+                                 headers={"Accept": "application/gzip"},
+                                 timeout=self._timeout)
+        status, body = result[0], result[1]
         raise_for_response(status, body)
         rows = instruments_mod.load(body)
         if cache:

@@ -8,11 +8,18 @@ MIS eligibility, funds and margins through the broker seam, duplicate tags,
 charges-adjusted loss, long only. PASS or BLOCK with reasons; a BLOCK is a
 verdict, never a crash.
 
+An approval in trader/state/orders.json from today with no later placed or
+failed record for the same order hash (ticket.py result was never run) is
+warned about: the order may be sitting at the broker. A PASS carries a
+valid_until (15 minutes, never past the entry cutoff) and trader-broker
+refuses an expired one.
+
 Standard library only, Python 3.8, no network in this module: the broker
 seam is injected (main argv, source=None) or read from recorded state.
 """
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -33,6 +40,7 @@ PLAN_PATH = "trader/plan.json"
 ORDERS_STATE = "orders.json"
 RISK_STATE = "risk.json"
 EPS = 1e-9
+FRESH_MINUTES = 15
 
 
 class RiskError(Exception):
@@ -124,6 +132,23 @@ def _trade_tags(state, today):
     return tags
 
 
+def unresolved_approvals(state, today):
+    """Approvals recorded today with no later placed or failed record for the same
+    order_hash: the order may be at the broker with ticket.py result never run.
+    They count toward the day's limits until a result is recorded."""
+    recs = (state or {}).get("orders", [])
+    out = []
+    for i, rec in enumerate(recs):
+        if rec.get("status") != "approved" or _trade_day(rec) != today:
+            continue
+        fp = rec.get("order_hash")
+        if any(r.get("order_hash") == fp and _trade_day(r) == today
+               and r.get("status") in ("placed", "failed") for r in recs[i + 1:]):
+            continue
+        out.append(rec)
+    return out
+
+
 # ---------------------------------------------------------------- the check
 
 def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
@@ -185,6 +210,15 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
                            "no new entries today" % (money_text(-day_loss), money_text(daily_cap)))
         checks["daily_loss"] = "%s realized today of %s cap" % (money_text(-day_loss), money_text(daily_cap))
 
+    # unresolved approvals: approved today with no later placed/failed record for the same
+    # order hash. They may already sit at the broker, so they count here, and each one warns.
+    pending = unresolved_approvals(state, today)
+    for rec in pending:
+        warns.append("an approval for %s at %s has no result recorded: run ticket.py result, or "
+                     "check get_order_book" % (rec.get("plain") or "%s %s" % (rec.get("side"),
+                                                                              rec.get("symbol")),
+                                               rec.get("at")))
+
     # trades per day
     trades_cap = int(acct.get("max_trades_per_day") or 0)
     entries_today = [r for r in (state or {}).get("orders", [])
@@ -203,6 +237,8 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
         reasons.append("%d orders recorded today, your limit is %d a day"
                        % (len(orders_today), orders_cap))
     checks["orders_today"] = "%d of %s" % (len(orders_today), orders_cap or "unlimited")
+    checks["unresolved_approvals"] = "%d approval(s) with no result recorded" % len(pending) if pending \
+        else "none"
 
     # reward:risk
     min_rr = as_float(acct.get("min_reward_risk"))
@@ -360,6 +396,15 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
             warns.append("%s is on your user-supplied %s list in the config (no live surveillance feed "
                          "is checked); review before trading" % (sym, label))
 
+    # verdict expiry for trader-broker (PR #21): a PASS is good for 15 minutes, and for an
+    # entry never past the session's entry_cutoff (15:00 IST by default). IST only: no
+    # early closes on the NSE regular session.
+    fresh_until = now + datetime.timedelta(minutes=FRESH_MINUTES)
+    cutoff = times["entry_cutoff"]
+    entry_until = min(fresh_until, datetime.datetime.combine(now.date(), cutoff,
+                                                             tzinfo=fresh_until.tzinfo))
+    valid_until = entry_until
+
     verdict = "BLOCK" if reasons else "PASS"
     return {
         "verdict": verdict,
@@ -368,6 +413,7 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
         "warnings": warns,
         "symbol": sym,
         "now": now.strftime("%Y-%m-%d %H:%M IST"),
+        "valid_until": valid_until.strftime("%Y-%m-%d %H:%M IST"),
         "plan": plan_,
     }
 

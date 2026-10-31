@@ -34,7 +34,8 @@ class SandboxUnsupported(UpstoxError):
 
 
 def default_transport(method, url, payload=None, headers=None, timeout=30):
-    """POST/GET over urllib. Returns (status, body_text); raises on network errors."""
+    """POST/GET over urllib. Returns (status, body_text, response_headers);
+    raises on network errors."""
     data = None
     req_headers = dict(headers or {})
     if payload is not None:
@@ -45,13 +46,32 @@ def default_transport(method, url, payload=None, headers=None, timeout=30):
         req.add_header(key, value)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.getcode(), resp.read().decode("utf-8", "surrogateescape")
+            return resp.getcode(), resp.read().decode("utf-8", "surrogateescape"), \
+                dict(resp.headers.items())
     except urllib.error.HTTPError as exc:
         try:
             body = exc.read().decode("utf-8", "surrogateescape")
         except Exception:
             body = ""
-        return exc.code, body
+        return exc.code, body, dict(exc.headers.items()) if exc.headers else {}
+
+
+RETRY_AFTER_CAP = 30.0  # seconds: a scan polls on fixed cadences, never camp on one
+
+
+def retry_after(headers):
+    """HTTP Retry-After header -> seconds, capped at RETRY_AFTER_CAP. None when
+    the header is absent, unparseable, or an HTTP-date (that would mean an
+    unknown wait, so it is treated as no guidance)."""
+    if not isinstance(headers, dict):
+        return None
+    for key, value in headers.items():
+        if str(key).lower() == "retry-after":
+            try:
+                return max(0.0, min(float(str(value).strip()), RETRY_AFTER_CAP))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def parse_udapi(body_text):
@@ -71,15 +91,17 @@ def parse_udapi(body_text):
     return {"errorCode": first.get("errorCode"), "message": first.get("message")}
 
 
-def raise_for_response(status, body_text):
+def raise_for_response(status, body_text, headers=None):
     """Map an HTTP response to a typed UpstoxError, or return None on success."""
     if status in (401, 403):
         raise UpstoxAuthError(
             "Upstox rejected the credentials (HTTP %d): re-authenticate, run the login skill" % status,
             status=status, code="AUTH_ERROR")
     if status == 429:
-        raise UpstoxRateLimit("Upstox rate limit hit (HTTP 429), slow down and retry", status=status,
+        err = UpstoxRateLimit("Upstox rate limit hit (HTTP 429), slow down and retry", status=status,
                               code="RATE_LIMIT")
+        err.retry_after = retry_after(headers)
+        raise err
     udapi = parse_udapi(body_text)
     if udapi is not None:
         code = udapi.get("errorCode") or "UDAPI_1000"
