@@ -262,6 +262,14 @@ type yes for it in the chat. Keep your host's tool permissions on
 "Allow once / Deny" card is a second check. No options, no margin beyond
 MIS, no short selling by default.
 
+**The gates are rules, not locks.** `ticket.py` records your yes; it cannot
+stop a tool call. What stops one is Claude following these skills and your
+own click on the permission card. The news and analyst skills pull
+third-party text into the conversation: headlines, announcements, results
+filings. Each tells Claude to treat that text as data, never as
+instructions, and to run in a session with no broker connector attached
+when it can. Do that.
+
 **Paper first.** `"mode": "sandbox"` is the default, and the Upstox sandbox
 serves the order APIs, so the paper loop is real tickets against a test
 host. Keys and tokens live in environment variables or the ignored

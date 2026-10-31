@@ -49,6 +49,7 @@ def bar(ltp):
 
 
 KEY = "NSE_EQ|INE002A01018"
+TCS_KEY = "NSE_EQ|INE467B01018"
 
 
 class Base(unittest.TestCase):
@@ -365,6 +366,112 @@ class Output(Base):
                                        FakeSource(), json_mode=True)
         self.assertEqual(code, 2)
         self.assertIn("unknown rule type", err)
+
+
+class QuoteSanity(Base):
+    RULES = [{"id": "rel-stop", "symbol": "RELIANCE", "instrument_key": KEY,
+              "type": "stop", "price": 1183.65},
+             {"id": "tcs-target", "symbol": "TCS", "instrument_key": TCS_KEY,
+              "type": "target", "price": 3100.0}]
+
+    def test_a_junk_ltp_is_one_error_and_the_batch_continues(self):
+        good = bar(3150.0)
+        junks = ("NaN", float("nan"), float("inf"), True, [3150.0], {"raw": 3150.0}, "n/a")
+        for i, junk in enumerate(junks):
+            now = "2026-10-%02d 10:00" % (20 + i)  # a fresh date re-arms the target
+            src = FakeSource({KEY: {"ltp": junk, "open": junk}, TCS_KEY: good})
+            code, doc, out, err = self.check(now, self.RULES, src, json_mode=True)
+            self.assertEqual(code, 2)
+            self.assertEqual([f["id"] for f in doc["fired"]], ["tcs-target"], junk)
+            self.assertEqual(len(doc["errors"]), 1, doc)
+            self.assertIn("%s is not a number" % KEY, doc["errors"][0])
+            self.assertNotIn("\n", doc["errors"][0])
+            self.assertNotIn("Traceback", err)
+            self.assertEqual(doc["missing"], [])  # the error line replaces it
+
+    def test_other_quote_fields_degrade_to_none_instead_of_blowing_up(self):
+        src = FakeSource({KEY: {"ltp": 1183.65, "open": "n/a", "high": None, "low": [1.0],
+                                "close": True, "prev_close": float("nan"),
+                                "volume": {"v": 1}}})
+        code, doc, _, err = self.check(MON + " 10:00", [self.RULES[0]], src, json_mode=True)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual([f["id"] for f in doc["fired"]], ["rel-stop"])
+        self.assertEqual(doc["fired"][0]["price"], 1183.65)
+
+
+class CalendarCoverage(Base):
+    def test_check_warns_when_the_checked_year_is_off_the_holiday_list(self):
+        rules = [{"id": "bell-open", "type": "bell", "bell": "open"}]
+        code, doc, out, err = self.check("2028-03-01 10:00", rules, FakeSource(), json_mode=True)
+        self.assertIn("the NSE holiday list covers 2026 only", out)
+        self.assertIn("nseindia.com", out)
+        self.assertEqual([p.get("kind") for p in doc["pending"]], ["calendar"])
+        code, doc, out, err = self.check(MON + " 10:00", rules, FakeSource(), json_mode=True)
+        self.assertNotIn("holiday list", out)
+
+
+class Rearm(Base):
+    RULE = [{"id": "RELIANCE-above-1200", "symbol": "RELIANCE", "instrument_key": KEY,
+             "type": "above", "price": 1200.0}]
+
+    def test_a_re_added_rule_rings_again(self):
+        args = ["add", "--rules", self.rules, "--config", self.config,
+                "--symbol", "RELIANCE", "--instrument-key", KEY, "--above", "1200"]
+        self.assertEqual(self.run_cli(args)[0], 0)
+        src = FakeSource({KEY: bar(1201.0)})
+        code, doc, _, err = self.check(MON + " 10:00", self.RULE, src, json_mode=True)
+        self.assertEqual((code, [f["id"] for f in doc["fired"]]), (0, ["RELIANCE-above-1200"]))
+        self.assertIn("RELIANCE-above-1200", json.dumps(self.state()))
+        code, doc, _, err = self.check(MON + " 10:01", self.RULE, src, json_mode=True)
+        self.assertEqual((code, doc["fired"]), (0, []))  # rang once
+        with open(self.rules, "w", encoding="utf-8") as fh:  # the user deletes it by hand...
+            json.dump({"rules": []}, fh)
+        self.assertEqual(self.run_cli(args)[0], 0)  # ...and adds it back
+        self.assertNotIn("RELIANCE-above-1200", json.dumps(self.state()))
+        code, doc, _, err = self.check(MON + " 10:02", self.RULE, src, json_mode=True)
+        self.assertEqual([f["id"] for f in doc["fired"]], ["RELIANCE-above-1200"])
+
+
+class BrokenState(Base):
+    RULES = [{"id": "rel-stop", "symbol": "RELIANCE", "instrument_key": KEY,
+              "type": "stop", "price": 1183.65}]
+
+    def test_a_state_dir_that_is_a_file_is_one_line(self):
+        block = os.path.join(self.tmp, "state")
+        with open(block, "w", encoding="utf-8") as fh:
+            fh.write("not a directory")
+        with open(self.config, "w", encoding="utf-8") as fh:
+            json.dump({"state_dir": block}, fh)
+        code, doc, out, err = self.check(MON + " 10:00", self.RULES,
+                                         FakeSource({KEY: bar(1183.65)}), json_mode=True)
+        self.assertEqual(code, 1)
+        self.assertIn("could not write", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_a_state_file_that_is_a_folder_is_one_line(self):
+        os.makedirs(os.path.join(self.tmp, "state", "alerts.json"))
+        code, doc, out, err = self.check(MON + " 10:00", self.RULES,
+                                         FakeSource({KEY: bar(1183.65)}), json_mode=True)
+        self.assertEqual(code, 1)
+        self.assertIn("could not write", err)
+        self.assertNotIn("Traceback", err)
+
+
+class Unexpected(Base):
+    def test_an_unexpected_error_is_one_line(self):
+        old = alerts.cmd_check
+
+        def boom(args, source=None):
+            raise KeyError("opens")
+        alerts.cmd_check = boom
+        try:
+            code, _, err = self.run_cli(["check", "--config", self.config,
+                                         "--now", MON + " 10:00"])
+        finally:
+            alerts.cmd_check = old
+        self.assertEqual(code, 1)
+        self.assertIn("unexpected KeyError", err)
+        self.assertNotIn("Traceback", err)
 
 
 def doc_empty(doc):
