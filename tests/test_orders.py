@@ -304,7 +304,7 @@ class ChargesTest(unittest.TestCase):
         cfg["charges"]["brokerage_per_order_inr"] = 7.0
         cheap = charges.charges("SELL", 1193.6, 25, cfg=cfg)
         self.assertEqual(cheap["brokerage"], 0.0)  # bps part is 0, below the cap
-        big = charges.round_trip(1.0, 1.0, 500, "I", cfg)  # 500 * 1.0 turnover
+        big = charges.round_trip(1.0, 1.0, 500, cfg=cfg)  # 500 * 1.0 turnover
         self.assertLessEqual(big["buy"]["brokerage"], 7.0)
 
     def test_brokerage_floored_at_zero_and_capped(self):
@@ -317,7 +317,7 @@ class ChargesTest(unittest.TestCase):
                          cfg["charges"]["brokerage_per_order_inr"])
 
     def test_round_trip_total_and_net(self):
-        out = charges.round_trip(1193.6, 1203.55, 25, "I", config.DEFAULTS)
+        out = charges.round_trip(1193.6, 1203.55, 25, cfg=config.DEFAULTS)
         self.assertEqual(out["gross_pnl"], 248.75)
         expected_total = round(out["buy"]["total"] + out["sell"]["total"], 2)
         self.assertEqual(out["total_charges"], expected_total)
@@ -325,11 +325,11 @@ class ChargesTest(unittest.TestCase):
         self.assertLess(out["net_pnl"], out["gross_pnl"])
 
     def test_charges_change_reported_pnl(self):
-        out = charges.round_trip(1193.6, 1203.55, 25, "I", config.DEFAULTS)
+        out = charges.round_trip(1193.6, 1203.55, 25, cfg=config.DEFAULTS)
         free = copy.deepcopy(config.DEFAULTS)
         for key in free["charges"]:
             free["charges"][key] = 0.0
-        zero = charges.round_trip(1193.6, 1203.55, 25, "I", free)
+        zero = charges.round_trip(1193.6, 1203.55, 25, cfg=free)
         self.assertEqual(zero["total_charges"], 0.0)
         self.assertEqual(zero["net_pnl"], 248.75)
         self.assertGreater(out["total_charges"], 0.0)
