@@ -598,8 +598,8 @@ class CsvExport(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--csv and --write must use different paths", err)
         # same file through a different spelling of the path
-        other = os.path.normcase(os.path.abspath(same))
-        code, _, err = self.run_csv(["--csv", other.upper(), "--write", other])
+        other = os.path.join(self.d, ".", "same.json")
+        code, _, err = self.run_csv(["--csv", other, "--write", same])
         self.assertEqual(code, 2)
         self.assertIn("--csv and --write must use different paths", err)
 
