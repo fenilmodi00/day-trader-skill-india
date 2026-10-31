@@ -86,7 +86,8 @@ KEYWORDS = [
     ("macro", r"\bFed\b|\bFOMC\b|\bCPI\b|\binflation\b|\btariffs?\b|\bfutures\b"),
 ]
 
-BROWSER_UA = "Mozilla/5.0 (compatible; day-trader-skill/3.0; +https://github.com/fenilmodi00/day-trader-skill-india)"
+# URL-free on purpose: NSE's edge stalls User-Agents that contain a URL.
+BROWSER_UA = "Mozilla/5.0 (compatible; day-trader-skill/3.0)"
 
 
 class NewsError(Exception):

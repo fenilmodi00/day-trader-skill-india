@@ -38,8 +38,9 @@ NIFTY500_DEFAULT = os.path.join(_ROOT, "trader-scanner", "nifty500.csv")
 EQUITY_L_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 BHAV_HOSTS = ("https://archives.nseindia.com", "https://nsearchives.nseindia.com")
 BHAV_PATH = "/products/content/sec_bhavdata_full_%s.csv"
-UA = ("Mozilla/5.0 (compatible; day-trader-skill/3.0; "
-      "+https://github.com/fenilmodi00/day-trader-skill-india)")
+# NSE's edge stalls requests whose User-Agent carries a URL (30s timeout live,
+# 0.3s without), so this identity stays URL-free.
+UA = "Mozilla/5.0 (compatible; day-trader-skill/3.0)"
 BHAV_STEM = re.compile(r"sec_bhavdata_full_(\d{2})(\d{2})(\d{4})")
 _MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
            "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}

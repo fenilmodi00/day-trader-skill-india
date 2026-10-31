@@ -275,6 +275,10 @@ class Artifact(Base):
 
 
 class Hygiene(Base):
+    def test_user_agent_is_url_free(self):
+        # NSE's edge stalls any User-Agent containing a URL.
+        self.assertNotIn("://", news.BROWSER_UA)
+
     def test_no_sec_edgar_cik_strings_in_sources_or_output(self):
         for name in ("news.py", "SKILL.md"):
             with open(os.path.join(ROOT, "trader-news", name), encoding="utf-8") as fh:

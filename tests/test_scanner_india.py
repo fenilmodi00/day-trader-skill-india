@@ -69,6 +69,11 @@ def bhav_arg():
 
 
 class Universe(unittest.TestCase):
+    def test_user_agent_is_url_free(self):
+        # NSE's edge stalls any User-Agent containing a URL: live EQUITY_L downloads
+        # timed out at 30s with the GitHub URL in the UA and returned in 0.3s without.
+        self.assertNotIn("://", scan.UA)
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.master = write_master(os.path.join(self.tmp, "master.json"))
