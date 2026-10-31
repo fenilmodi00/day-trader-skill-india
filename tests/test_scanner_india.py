@@ -74,6 +74,13 @@ class Universe(unittest.TestCase):
         # timed out at 30s with the GitHub URL in the UA and returned in 0.3s without.
         self.assertNotIn("://", scan.UA)
 
+    def test_seed_nifty500_parses_past_its_comment_lines(self):
+        # The checked-in seed starts with `#` comments; a plain DictReader took the
+        # comment as the header, so every live `universe` run failed on it.
+        with open(scan.NIFTY500_DEFAULT, encoding="utf-8") as fh:
+            table = scan.parse_nifty500(fh.read())
+        self.assertEqual(table["RELIANCE"], "INE002A01018")
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.master = write_master(os.path.join(self.tmp, "master.json"))
@@ -128,6 +135,15 @@ class Daily(unittest.TestCase):
     def doc(self, argv):
         code, out_text, err = run(self.base + argv)
         return code, (json.loads(out_text) if out_text.strip() else None), err
+
+    def test_symbols_scan_without_a_universe_file(self):
+        code, out_text, err = run(["daily", "--symbols", "ADANIENT", "--out", self.out,
+                                   "--master", self.master, "--now", "2026-10-27 18:30",
+                                   "--no-write", "--json"] + BAVS_LIST)
+        self.assertEqual(code, 0, err)
+        doc = json.loads(out_text)
+        self.assertEqual(doc["universe"], 1)
+        self.assertEqual([h["symbol"] for h in doc["symbols"]], ["ADANIENT"])
 
     def test_ranks_by_turnover_and_carries_the_instrument(self):
         code, doc, err = self.doc(BAVS_LIST)

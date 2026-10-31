@@ -54,7 +54,9 @@ class Repo(unittest.TestCase):
         self.assertEqual(found, sorted(SKILLS))
 
     def test_root_matches_the_india_layout(self):
-        root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
+        # `trader/` is the ignored runtime state dir created by live runs, not layout.
+        root = sorted(d for d in os.listdir(ROOT)
+                      if not d.startswith(".git") and d != "trader")
         self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests",
                                        "trader_core"] + SKILLS))
         # hidden entries the filter above skips

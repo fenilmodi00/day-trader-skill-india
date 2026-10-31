@@ -330,12 +330,15 @@ def parse_equity_l(text):
 
 
 def parse_nifty500(text):
-    """Nifty 500 constituents CSV -> {symbol: isin}."""
-    reader = csv.DictReader(io.StringIO(text))
+    """Nifty 500 constituents CSV -> {symbol: isin}. The checked-in seed carries
+    `#` header comments, so comment and blank lines are skipped before parsing."""
+    rows = [ln for ln in text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+    reader = csv.DictReader(io.StringIO("\n".join(rows)))
     fields = {}
     for f in (reader.fieldnames or []):
         if f:
-            fields[f.strip().upper()] = f
+            fields[f.strip().upper().lstrip("\ufeff")] = f
     sym_f = fields.get("SYMBOL")
     if not sym_f:
         raise ScanError("not a Nifty 500 constituents file (no SYMBOL column)")
@@ -879,7 +882,13 @@ def cmd_daily(a, source=None, fetch=None):
         cache_dir = a.bhavcopy_dir or os.path.join(cfgmod.state_dir(cfg), "bhavcopy")
         sessions = live_sessions(day, cache_dir, fetch)
         doc_source = "nse-bhavcopy"
-    universe = read_universe(a.universe or DEFAULT_UNIVERSE)
+    if a.symbols:
+        names = [s for s in re.split(r"[,\s]+", a.symbols.upper()) if s]
+        if not names:
+            raise ScanError("no symbols to scan")
+        universe = [(sym, None, None) for sym in names]
+    else:
+        universe = read_universe(a.universe or DEFAULT_UNIVERSE)
     master = load_master(a, cfg=cfg, live=not a.offline)
     mindex = instruments_mod.index(master) if master else {}
     entries, counts, final_day = scan_daily(sessions, universe, mindex, a.min_price)
