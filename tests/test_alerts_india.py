@@ -133,6 +133,12 @@ class AddPlan(Base):
         doc = json.loads(out)
         self.assertIn("rules", doc)
 
+    def test_default_plan_path_is_the_shared_plan_and_plan_flag_overrides(self):
+        parser = alerts._parser()
+        self.assertEqual(parser.parse_args(["add", "--from-plan"]).plan, "trader/plan.json")
+        self.assertEqual(parser.parse_args(["plan"]).plan, "trader/plan.json")
+        self.assertEqual(parser.parse_args(["add", "--from-plan", "--plan", PLAN]).plan, PLAN)
+
 
 class Bells(Base):
     def test_preopen_open_and_close_bells_fire_once_each(self):
