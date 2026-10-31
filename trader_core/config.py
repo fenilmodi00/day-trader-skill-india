@@ -20,6 +20,7 @@ ENV = {
 LIVE_PHRASE = "GO LIVE WITH UPSTOX"
 CONFIRM_STATE = "live_confirmation.json"
 DEFAULT_PATH = "trader/config.json"
+PLAN_PATH = "trader/plan.json"
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -58,7 +59,6 @@ DEFAULTS = {
         "brokerage_bps": 5.0,
         "brokerage_per_order_inr": 20.0,
         "stt_intraday_sell_bps": 2.5,
-        "stt_delivery_bps": 10.0,
         "exchange_bps": 0.297,
         "sebi_bps": 0.01,
         "stamp_bps": 0.3,
@@ -74,6 +74,7 @@ DEFAULTS = {
         "default": "I",
     },
     "risk": {
+        "mis_products": ["I"],
         "blocked_symbols": [],
         "asm_symbols": [],
         "gsm_symbols": [],

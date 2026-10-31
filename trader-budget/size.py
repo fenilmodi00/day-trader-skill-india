@@ -6,7 +6,9 @@ sizes it against the INR budget and the per-trade max loss, rounds every
 price onto the instrument's tick grid without widening the risk, rounds the
 quantity down to whole lots (equity lot is 1, F&O lots come from the Upstox
 instrument row), and emits the two-leg plan contract: legs built with
-trader_core.orders, ready for trader-risk and trader-broker.
+trader_core.orders, ready for trader-risk and trader-broker. It prints the
+sized plan and, only with --write, saves it as the plan JSON those two read
+(trader/plan.json by default).
 
 Standard library only, Python 3.8, no network in this module.
 """
@@ -257,11 +259,26 @@ def run(a):
         raise SizeError(str(e))
     s = size_plan(plan_doc, cfg, instrument, budget=a.budget, max_loss=a.max_loss, product=a.product,
                   today=parse_ist(a.now).date().isoformat() if a.now else None)
+    wrote = bool(a.write and s.get("quantity"))
+    if wrote:
+        try:
+            directory = os.path.dirname(a.write)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(a.write, "w", encoding="utf-8") as fh:
+                json.dump(s, fh, indent=2)
+                fh.write("\n")
+        except OSError as exc:
+            raise SizeError("cannot write %s: %s" % (a.write, exc))
     if a.json:
         doc = {"sizing": {k: v for k, v in s.items() if k != "legs"}, "plan": s, "legs": s["legs"]}
         print(json.dumps(doc, indent=2))
     else:
         print(report(s))
+        if wrote:
+            print("Wrote %s. Next: trader-risk check.py --plan %s." % (a.write, a.write))
+        elif a.write:
+            print("Nothing written: there is no sized order to save.")
     return 0 if not s.get("refusal") else 1
 
 
@@ -269,7 +286,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="size.py",
         description="Size a trade plan to your INR budget and max loss (trader-budget).")
-    ap.add_argument("--plan", default="trader/plan.json", help="the trade plan (default trader/plan.json)")
+    ap.add_argument("--plan", default=config.PLAN_PATH,
+                    help="the trade plan (default %s)" % config.PLAN_PATH)
     ap.add_argument("--config", default="trader/config.json", help="rules (default trader/config.json)")
     ap.add_argument("--instruments", help="Upstox instrument master slice (JSON), for lot, tick, freeze")
     ap.add_argument("--budget", type=float, help="override account.budget_inr")
@@ -277,6 +295,9 @@ def main(argv=None):
     ap.add_argument("--product", help="override products.default (I, D or MTF)")
     ap.add_argument("--now", help="pretend it is this IST date/time, e.g. \"2026-10-26 10:00\"")
     ap.add_argument("--json", action="store_true", help="print the plan JSON instead of the report")
+    ap.add_argument("--write", nargs="?", const=config.PLAN_PATH, metavar="PATH",
+                    help="save the sized plan for trader-risk and trader-broker (default %s); "
+                         "nothing is written without it" % config.PLAN_PATH)
     a = ap.parse_args(argv)
     try:
         return run(a)

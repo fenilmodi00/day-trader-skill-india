@@ -5,11 +5,11 @@ It never places an order; nothing goes to the broker without your yes, out
 loud.
 
     python3 exit.py plan                                     # from trader/entry.json: or-mid stop, 2R target
-    python3 exit.py plan --stop or-mid --target 1R --write trader/exit.json
+    python3 exit.py plan --stop or-mid --target 1R --write trader/plan.json
     python3 exit.py plan --symbol RELIANCE --entry 1193.60 --or-high 1192.00 --or-low 1175.30
     python3 exit.py plan --stop atr:1.5 --offline RELIANCE-1m.json   # ATR needs the session's bars
     python3 exit.py plan --symbol TCS --entry 3120.00 --setup level --stop pct:1
-    python3 exit.py show                                     # the current trader/exit.json
+    python3 exit.py show                                     # the current trader/plan.json
 
 Prices snap to the instrument's tick_size (orders.round_tick). A long's stop
 rounds DOWN, away from the entry; the target rounds UP, away from the entry;
@@ -62,7 +62,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from trader_core import IST  # noqa: E402
+from trader_core import IST, OPEN  # noqa: E402
 from trader_core import calendar as cal  # noqa: E402
 from trader_core import config as cfgmod  # noqa: E402
 from trader_core import instruments as instruments_mod  # noqa: E402
@@ -72,7 +72,7 @@ from trader_core.timeutil import fmt_ist, now_ist, parse_ist  # noqa: E402
 
 ATR_BARS = 14
 MIN_RISK_PCT = Decimal("0.05")     # without an instrument, risk under 0.05% of the price is spread noise
-DEFAULT_EXIT = "trader/exit.json"
+DEFAULT_PLAN = cfgmod.PLAN_PATH
 NOTE = "A stop is a plan, not a guarantee: a gap or a fast market can fill past it."
 
 
@@ -320,25 +320,21 @@ def atr_of(bars, n=ATR_BARS):
 
 
 def session_bars(rows, day, bar_min=5, upto_slot=None, at=None):
-    """Closed 5m bars of one IST session, oldest first. `at` cuts the session
-    at a wall-clock time; upto_slot cuts after the entry bar."""
-    from trader_core import CLOSE as CLOSE_T, OPEN as OPEN_T
-    from trader_core.timeutil import to_ist
-
-    open_dt, close_dt = _ist(day, OPEN_T), _ist(day, CLOSE_T)
-    out = {}
-    for b in bars_of(rows):
-        dt = b["dt"] if isinstance(b["dt"], datetime.datetime) else upstox_mod._parse_ts(b["dt"])
-        dt = to_ist(dt)
-        if dt.date() != day or not (open_dt <= dt < close_dt):
+    """Closed N-minute bars of one IST session, oldest first: the 1m rows go
+    through the one resample in trader_core.upstox. `at` cuts the session at a
+    wall-clock time; upto_slot cuts after the entry bar."""
+    open_dt = _ist(day, OPEN)
+    out = []
+    for b in upstox_mod.resample(bars_of(rows), bar_min):
+        if b["dt"].date() != day:
             continue
-        slot = int((dt - open_dt).total_seconds()) // (bar_min * 60)
+        slot = int((b["dt"] - open_dt).total_seconds()) // (bar_min * 60)
         if upto_slot is not None and slot > upto_slot:
             continue
-        if at is not None and dt + datetime.timedelta(minutes=bar_min) > at:
+        if at is not None and b["dt"] + datetime.timedelta(minutes=bar_min) > at:
             continue
-        out[slot] = {"h": b["h"], "l": b["l"], "c": b["c"]}
-    return [out[k] for k in sorted(out)]
+        out.append({"h": b["h"], "l": b["l"], "c": b["c"]})
+    return out
 
 
 def load_bars_offline(path):
@@ -492,8 +488,8 @@ def build_plan(a, now):
                 raise PlanError("cannot read Upstox intraday bars: %s" % e)
         if not cal.is_trading_day(day) or not rows:
             raise PlanError("no bars for %s" % day.isoformat())
-        bars = session_bars5(rows, day, 5, info.get("entry_bar"),
-                             parse_ist(a.now) if a.now else None)
+        bars = session_bars(rows, day, 5, info.get("entry_bar"),
+                            parse_ist(a.now) if a.now else None)
         if len(bars) < 3:
             raise PlanError("an atr stop needs at least 3 closed 5m bars by the entry on %s; found %d"
                             % (day.isoformat(), len(bars)))
@@ -667,11 +663,11 @@ def main(argv=None, source=None):
     p.add_argument("--config", default="trader/config.json")
     p.add_argument("--offline", metavar="PATH", help="recorded Upstox 1m fixture for an atr stop")
     p.add_argument("--now", help='pretend it is this IST time, e.g. "2026-10-26 10:05"')
-    p.add_argument("--write", nargs="?", const=DEFAULT_EXIT, metavar="PATH",
-                   help="save the plan (default %s)" % DEFAULT_EXIT)
+    p.add_argument("--write", nargs="?", const=DEFAULT_PLAN, metavar="PATH",
+                   help="save the plan (default %s)" % DEFAULT_PLAN)
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("show", help="print the current plan")
-    p.add_argument("--plan", default=DEFAULT_EXIT)
+    p.add_argument("--plan", default=DEFAULT_PLAN)
     p.add_argument("--now")
     p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)

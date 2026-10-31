@@ -1,6 +1,7 @@
 """India tests for trader-budget: INR sizing, whole lots, tick snapping, plan contract."""
 
 import copy
+import datetime
 import io
 import json
 import os
@@ -16,11 +17,15 @@ from trader_core import config, orders  # noqa: E402
 from trader_core.instruments import load as load_instruments  # noqa: E402
 
 size = load("trader-budget", "size")
+risk = load("trader-risk", "check")
 
 DIR = os.path.join(FIX, "trader-budget", "india")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KEY = "NSE_EQ|INE002A01018"
 NIFTY_KEY = "NSE_FO|9992600"
 MON = "2026-10-26"
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+NOW = datetime.datetime(2026, 10, 26, 10, 0, tzinfo=IST)
 REL = {"instrument_key": KEY, "trading_symbol": "RELIANCE", "lot_size": 1.0,
        "tick_size": 0.05, "freeze_quantity": 11111.0}
 NIFTY = {"instrument_key": NIFTY_KEY, "trading_symbol": "NIFTY", "lot_size": 75.0,
@@ -269,6 +274,85 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("mode must be one of", err)
         self.assertNotIn("Traceback", err)
+
+
+class WritePlan(unittest.TestCase):
+    """--write saves the sized plan as the exact JSON trader-risk reads; without
+    the flag nothing is written."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dt-t7-budget-write-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.inst = os.path.join(DIR, "instruments.json")
+
+    def write_src(self):
+        path = os.path.join(self.tmp, "incoming.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rel_legs(), fh)
+        return path
+
+    def run_cli(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        old = os.getcwd()
+        os.chdir(self.tmp)                       # the shared plan path is repo-relative
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = size.main(argv)
+        finally:
+            os.chdir(old)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_write_saves_the_plan_risk_reads(self):
+        code, text, err = self.run_cli(["--plan", self.write_src(), "--instruments", self.inst,
+                                        "--now", MON, "--write"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Wrote trader/plan.json", text)
+        saved_path = os.path.join(self.tmp, "trader", "plan.json")
+        with open(saved_path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        for key in ("symbol", "instrument_key", "direction", "product", "entry", "stop",
+                    "target", "tick_size", "lot_size", "quantity", "legs"):
+            self.assertIn(key, saved, key)
+        self.assertEqual(saved["quantity"], 25)
+        self.assertEqual([one["role"] for one in saved["legs"]], ["entry", "stop", "target"])
+        res = risk.check(saved, base_cfg(), now=NOW, instrument=REL, record={})
+        self.assertIn(res["verdict"], ("PASS", "BLOCK"))
+        self.assertNotIn("missing", res["checks"]["plan"])
+        self.assertNotIn("not measurable", res["checks"]["max_loss"])
+
+    def test_no_write_without_the_flag(self):
+        code, text, err = self.run_cli(["--plan", self.write_src(), "--instruments", self.inst,
+                                        "--now", MON, "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(text)["plan"]["quantity"], 25)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "trader", "plan.json")))
+
+
+class ExampleConfigs(unittest.TestCase):
+    """Both example configs show the schema config.DEFAULTS documents: the same
+    keys in every section they show, state_dir and risk.mis_products included,
+    and no dead delivery-only charge rate."""
+
+    def examples(self):
+        for folder in ("trader-budget", "trader-broker"):
+            path = os.path.join(ROOT, folder, "config.example.json")
+            with open(path, encoding="utf-8") as fh:
+                yield folder, path, json.load(fh)
+
+    def assert_same_keys(self, doc, base, where):
+        self.assertEqual(set(doc), set(base), where)
+        for key, want in base.items():
+            if isinstance(want, dict):
+                self.assertIsInstance(doc.get(key), dict, "%s.%s" % (where, key))
+                self.assert_same_keys(doc[key], want, "%s.%s" % (where, key))
+
+    def test_examples_match_the_defaults_schema(self):
+        for folder, path, doc in self.examples():
+            self.assert_same_keys(doc, config.DEFAULTS, folder)
+            self.assertEqual(doc["state_dir"], config.DEFAULTS["state_dir"], folder)
+            self.assertEqual(doc["risk"]["mis_products"], ["I"], folder)
+            self.assertNotIn("stt_delivery_bps", doc["charges"], folder)
+            self.assertEqual(config.load(path)["risk"]["mis_products"], ["I"], folder)
 
 
 if __name__ == "__main__":
