@@ -447,6 +447,34 @@ class InstrumentsTest(unittest.TestCase):
         with open(os.path.join(FX, "instruments-NSE.json.gz"), "rb") as fh:
             cls.raw = fh.read()
 
+    def test_raw_tick_paise_converts_to_inr(self):
+        import trader_core.instruments as instruments
+        rows = instruments.normalize({"trading_symbol": "X", "instrument_key": "NSE_EQ|X",
+                                      "tick_size": 5.0})
+        self.assertEqual(rows["tick_size"], 0.05)
+        rows = instruments.normalize({"trading_symbol": "X", "instrument_key": "NSE_EQ|X",
+                                      "tick_size": 10.0})
+        self.assertEqual(rows["tick_size"], 0.1)
+
+    def test_missing_and_zero_tick_stay_falsy_without_crashing(self):
+        import trader_core.instruments as instruments
+        missing = instruments.normalize({"trading_symbol": "X", "instrument_key": "NSE_EQ|X"})
+        self.assertFalse(missing["tick_size"])          # no tick info: stays None, not a guess
+        zero = instruments.normalize({"trading_symbol": "X", "instrument_key": "NSE_EQ|X",
+                                      "tick_size": 0})
+        self.assertEqual(zero["tick_size"], 0)
+
+    def test_fixture_master_reliance_tick_is_005_inr(self):
+        import trader_core.instruments as instruments
+        rel = instruments.find(instruments.load(self.raw), "RELIANCE")
+        self.assertEqual(rel["tick_size"], 0.05)
+
+    def test_instrument_master_url_is_the_documented_host(self):
+        from trader_core import upstox
+        self.assertTrue(upstox.INSTRUMENT_MASTER_URL.startswith(
+            "https://assets.upstox.com/market-quote/instruments/exchange/"))
+        self.assertTrue(upstox.INSTRUMENT_MASTER_URL.endswith("%s.json.gz"))
+
     def test_fixture_parses_gz_and_plain(self):
         import trader_core.instruments as instruments
         rows = instruments.load(self.raw)

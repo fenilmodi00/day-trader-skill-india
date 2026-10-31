@@ -24,18 +24,19 @@ EMPTY_BHAV = os.path.join(SDIR, "sec_bhavdata_full_28102026.csv")
 ORB_FILE = os.path.join(SDIR, "RELIANCE-1m-2026-10-21-27.json")
 KEY = "NSE_EQ|INE002A01018"
 
+# Raw Upstox master rows: tick_size arrives in paise (a 0.05 INR tick is 5.0).
 MASTER_ROWS = [
     {"instrument_key": KEY, "exchange_token": "2885", "trading_symbol": "RELIANCE",
-     "isin": "INE002A01018", "instrument_type": "EQ", "lot_size": 1.0, "tick_size": 0.05,
+     "isin": "INE002A01018", "instrument_type": "EQ", "lot_size": 1.0, "tick_size": 5.0,
      "freeze_quantity": 11111.0},
     {"instrument_key": "NSE_EQ|INE467B01029", "exchange_token": "11536", "trading_symbol": "TCS",
-     "isin": "INE467B01029", "instrument_type": "EQ", "lot_size": 1.0, "tick_size": 0.05,
+     "isin": "INE467B01029", "instrument_type": "EQ", "lot_size": 1.0, "tick_size": 5.0,
      "freeze_quantity": 10000.0},
     {"instrument_key": "NSE_EQ|INE423A01024", "exchange_token": "25", "trading_symbol": "ADANIENT",
-     "isin": "INE423A01024", "instrument_type": "EQ", "lot_size": 1.0, "tick_size": 0.05,
+     "isin": "INE423A01024", "instrument_type": "EQ", "lot_size": 1.0, "tick_size": 5.0,
      "freeze_quantity": 4833.0},
     {"instrument_key": "NSE_FO|57353", "exchange_token": "57353", "trading_symbol": "RELIANCE",
-     "isin": "INE002A01018", "instrument_type": "FUT", "lot_size": 500.0, "tick_size": 0.05,
+     "isin": "INE002A01018", "instrument_type": "FUT", "lot_size": 500.0, "tick_size": 5.0,
      "freeze_quantity": 4500.0},
 ]
 

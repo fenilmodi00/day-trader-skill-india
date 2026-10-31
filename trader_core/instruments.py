@@ -53,7 +53,13 @@ def _number(row, *names):
 
 
 def normalize(row):
-    """Map a master row (or an already normalized row) to the pinned field set."""
+    """Map a master row (or an already normalized row) to the pinned field set.
+
+    Upstox publishes tick_size in paise, not rupees: the live NSE master lists
+    RELIANCE as 10.0 and a 0.05 INR future arrives as 5.0, so the raw value is
+    divided by 100 here, at the parse boundary. Every consumer downstream sees
+    INR. Missing or zero stays 0; nothing crashes on a bad unit.
+    """
     if not isinstance(row, dict):
         raise InstrumentError("instrument row must be a JSON object")
     symbol = _first(row, "trading_symbol", "tradingsymbol", "symbol")
@@ -65,6 +71,9 @@ def normalize(row):
     expiry = _first(row, "expiry")
     if isinstance(expiry, str):
         expiry = expiry[:10]
+    tick = _number(row, "tick_size")
+    if tick:
+        tick = round(tick / 100.0, 4)
     return {
         "instrument_key": str(key),
         "exchange_token": _first(row, "exchange_token", "token"),
@@ -72,7 +81,7 @@ def normalize(row):
         "isin": _first(row, "isin"),
         "instrument_type": _first(row, "instrument_type"),
         "lot_size": _number(row, "lot_size"),
-        "tick_size": _number(row, "tick_size"),
+        "tick_size": tick,
         "freeze_quantity": _number(row, "freeze_quantity"),
         "expiry": expiry,
         "strike_price": _number(row, "strike_price", "strike"),
@@ -105,7 +114,11 @@ def index(rows):
 
 
 def find(rows, symbol, exchange="NSE_EQ"):
-    """Normalized row for symbol on exchange, InstrumentError when absent."""
+    """Normalized row for symbol on exchange, InstrumentError when absent.
+
+    Rows are expected to come from load()/normalize(); they are matched, not
+    normalized again, so tick_size is not converted from paise twice.
+    """
     wanted = str(symbol).strip().upper()
     if not wanted:
         raise InstrumentError("empty instrument symbol")
@@ -115,12 +128,12 @@ def find(rows, symbol, exchange="NSE_EQ"):
         if str(row.get("trading_symbol", "")).upper() != wanted:
             continue
         if str(row.get("instrument_key", "")).startswith(prefix):
-            return normalize(row)
+            return row
         if fallback is None:
             fallback = row
     if fallback is None:
         raise InstrumentError("unknown instrument: %s" % symbol)
-    return normalize(fallback)
+    return fallback
 
 
 def key(rows, symbol, exchange="NSE_EQ"):

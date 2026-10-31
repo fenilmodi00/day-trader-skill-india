@@ -550,7 +550,7 @@ class Cli(unittest.TestCase):
     def test_plain_instrument_master_loads(self):
         master = os.path.join(self.tmp, "master.json")
         with open(master, "w", encoding="utf-8") as fh:
-            json.dump([REL], fh)
+            json.dump([dict(REL, tick_size=5.0)], fh)  # raw masters carry paise
         code, out, err = self.run_cli(["--plan", self.plan_path, "--now", "2026-10-26 10:00",
                                        "--instruments", master, "--json", "--no-write"])
         self.assertEqual(code, 0, out + err)

@@ -255,7 +255,7 @@ class Cli(unittest.TestCase):
         path = self.write_plan(rel_legs())
         master = os.path.join(self.tmp, "master.json")
         with open(master, "w", encoding="utf-8") as fh:
-            json.dump([REL], fh)
+            json.dump([dict(REL, tick_size=5.0)], fh)  # raw masters carry paise
         code, out, err = self.run_cli(["--plan", path, "--instruments", master,
                                        "--now", "not-a-time"])
         self.assertEqual(code, 2)
