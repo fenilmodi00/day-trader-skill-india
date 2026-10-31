@@ -759,6 +759,9 @@ def main(argv=None, source=None):
     except EntryError as e:
         print("entry.py: %s" % e, file=sys.stderr)
         return 2
+    except (cfgmod.ConfigError, ValueError) as e:
+        print("entry.py: %s" % e, file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         print("entry.py: stopped.", file=sys.stderr)
         return 1

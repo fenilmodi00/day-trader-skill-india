@@ -481,6 +481,14 @@ class InstrumentsTest(unittest.TestCase):
         with self.assertRaises(InstrumentError):
             instruments.find([], "RELIANCE")
 
+    def test_key_helper_resolves_and_never_invents(self):
+        import trader_core.instruments as instruments
+        rows = instruments.load(self.raw)
+        self.assertEqual(instruments.key(rows, "RELIANCE"), KEY)
+        self.assertEqual(instruments.key(rows, "NIFTY", exchange="NSE_FO"), "NSE_FO|9992600")
+        with self.assertRaises(InstrumentError):
+            instruments.key(rows, "INFY")
+
     def test_malformed_masters_raise(self):
         import trader_core.instruments as instruments
         for bad in (b"", b"{not json", b"[]", b'{"data": "nope"}', b'[{"trading_symbol": "X"}]'):
@@ -505,6 +513,37 @@ class InstrumentsTest(unittest.TestCase):
         forced = client.instruments(refresh=True)
         self.assertEqual(len(forced), 4)
         self.assertEqual(len(transport.calls), 1)
+
+
+class TokenFileTest(unittest.TestCase):
+    """The default <repo>/trader/state/tokens.json is read when state_dir is
+    empty; an explicit state_dir still wins."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dt-tokens-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        from trader_core import config as cfgmod
+        self.cfgmod = cfgmod
+
+    def write_tokens(self, state, doc):
+        os.makedirs(state, exist_ok=True)
+        with open(os.path.join(state, "tokens.json"), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return state
+
+    def test_default_state_dir_token_is_found(self):
+        self.write_tokens(os.path.join(self.tmp, "trader", "state"),
+                          {"sandbox": "sb-default", "access": "acc-default"})
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(self.cfgmod, "REPO_ROOT", self.tmp):
+            self.assertEqual(Client({})._token("sandbox"), "sb-default")
+            self.assertEqual(Client({}, mode="live")._token("trading"), "acc-default")
+
+    def test_explicit_state_dir_wins(self):
+        self.write_tokens(os.path.join(self.tmp, "trader", "state"), {"sandbox": "from-default"})
+        explicit = self.write_tokens(os.path.join(self.tmp, "other"), {"sandbox": "from-explicit"})
+        with mock.patch.object(self.cfgmod, "REPO_ROOT", self.tmp):
+            self.assertEqual(Client({"state_dir": explicit})._token("sandbox"), "from-explicit")
 
 
 if __name__ == "__main__":

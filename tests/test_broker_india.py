@@ -338,7 +338,7 @@ class BrokerIndiaTests(unittest.TestCase):
 
     # --- flatten ---
     def test_flatten_market_protection_and_gates(self):
-        self.risk_pass()
+        self.risk_pass()  # the PASS covers the plan; both orders derive from it
         # flatten command prepares ticket
         code, out, err = run_cli(ticket, ["flatten", "--symbol", "RELIANCE"] + self.common())
         self.assertEqual(code, 0)
@@ -347,11 +347,44 @@ class BrokerIndiaTests(unittest.TestCase):
         self.assertEqual(o["order_type"], "MARKET")
         self.assertEqual(o["side"], "SELL")
         self.assertEqual(o["market_protection"], 10)
-        # show not ready until risk pass for flatten (risk.json is for entry) -> hash mismatch
+        # the same plan's fresh PASS is READY for the flatten order too
         code, out, err = run_cli(ticket, ["show"] + self.common())
-        self.assertNotEqual(code, 0)
-        # approve without risk pass for flatten -> gate 1 fails
-        code, out, err = run_cli(ticket, ["approve", "--yes", "yes sell 25 RELIANCE", "--flatten"] + self.common())
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("READY", out)
+        self.assertIn("SELL 25 RELIANCE", out)
+
+    def test_flatten_execute_sends_one_market_sell_and_records_it(self):
+        self.risk_pass()
+        run_cli(ticket, ["flatten", "--symbol", "RELIANCE"] + self.common())
+        code, out, err = run_cli(ticket, ["approve", "--flatten", "--yes", "yes sell 25 RELIANCE"]
+                                 + self.common())
+        self.assertEqual((code, err), (0, ""), out)
+        code, out, err = run_cli(ticket, ["execute"] + self.common(), source=self.broker)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.broker.calls), 1)
+        payload = self.broker.calls[0]
+        self.assertEqual(payload["transaction_type"], "SELL")
+        self.assertEqual(payload["order_type"], "MARKET")
+        self.assertEqual(payload["quantity"], 25)
+        self.assertEqual(payload["market_protection"], 10)
+        self.assertEqual(payload["instrument_token"], KEY)
+        t = json.load(open(self.ticket_path))
+        self.assertEqual(t["status"], "placed")
+        state = json.load(open(os.path.join(self.tmp, "state", "orders.json")))
+        placed = [r for r in state["orders"] if r.get("status") == "placed"]
+        self.assertEqual(len(placed), 1)
+        self.assertEqual((placed[0]["kind"], placed[0]["side"], placed[0]["quantity"]),
+                         ("flatten", "SELL", 25))
+
+    def test_flatten_gate_rejects_a_pass_for_a_changed_plan(self):
+        self.risk_pass()
+        run_cli(ticket, ["flatten", "--symbol", "RELIANCE"] + self.common())
+        changed = rel_plan()
+        changed["legs"][1]["trigger_price"] = 1184.0  # the plan moved after the PASS
+        with open(self.plan_path, "w", encoding="utf-8") as fh:
+            json.dump(changed, fh)
+        code, out, err = run_cli(ticket, ["approve", "--flatten", "--yes", "yes sell 25 RELIANCE"]
+                                 + self.common())
         self.assertEqual(code, 2)
         self.assertIn("gate 1", err)
 

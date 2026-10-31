@@ -197,12 +197,9 @@ def cmd_plan(args):
 # ------------------------------------------------------------------ check
 
 def _quote_key(rule):
-    """The instrument key a rule is quoted on: the plan key, else an NSE_EQ guess."""
-    if rule.get("instrument_key"):
-        return rule["instrument_key"]
-    if rule.get("symbol"):
-        return "NSE_EQ|" + str(rule["symbol"])
-    return None
+    """The instrument key a rule is quoted on: the rule's own key, never an
+    NSE_EQ|SYMBOL guess (Upstox has no such key). None when the rule has none."""
+    return rule.get("instrument_key") or None
 
 
 def cmd_check(args, source=None):
@@ -227,20 +224,33 @@ def cmd_check(args, source=None):
     keys = []
     for rule in rules:
         if rule.get("type") in PRICE_KINDS and not (rule.get("date") and rule["date"] != day):
-            rule["_qkey"] = _quote_key(rule)
+            qkey = _quote_key(rule)
+            if not qkey:
+                if rule.get("symbol"):
+                    rule["_missing_key"] = True
+                    errors.append("no instrument_key for %s: add --instrument-key to the rule or arm "
+                                  "it with --from-plan; the quote was not requested"
+                                  % rule["symbol"])
+                    continue
+                rule["_qkey"] = None
+                price_rules.append(rule)
+                continue
+            rule["_qkey"] = qkey
             price_rules.append(rule)
-            if rule["_qkey"] and rule["_qkey"] not in keys:
-                keys.append(rule["_qkey"])
+            if qkey not in keys:
+                keys.append(qkey)
+    quote_failed = False
     if keys:
         try:
             src = source if source is not None else Client(cfg)
             quotes = src.quote(keys) or {}
         except UpstoxAuthError as exc:
+            quote_failed = True
             errors.append("Upstox rejected the access token (%s): re-authenticate with Upstox "
                           "to refresh the token, then run the check again" % exc)
         except (UpstoxError, OSError) as exc:
+            quote_failed = True
             errors.append("quote request failed: %s" % exc)
-    quote_failed = bool(keys) and bool(errors)
 
     if closed_note:
         pending.append({"kind": "closed", "detail": closed_note})
@@ -248,6 +258,8 @@ def cmd_check(args, source=None):
         kind = rule.get("type")
         rid = str(rule.get("id") or kind)
         if rule.get("date") and rule["date"] != day:
+            continue
+        if rule.get("_missing_key"):
             continue
         # seen key: symbol (or bell), alert kind, rule id, IST date; a new date re-arms
         key = "%s|%s|%s|%s" % (rule.get("symbol") or rule.get("bell") or "market",

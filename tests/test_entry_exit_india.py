@@ -288,5 +288,61 @@ class PlanCLI(unittest.TestCase):
         self.assertEqual(json.loads(text)["stop"], 1183.65)
 
 
+class CliBoundary(unittest.TestCase):
+    """Bad user input exits 2 with one line, never a traceback."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dt-cli-boundary-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bad_cfg = os.path.join(self.tmp, "config.json")
+        with open(self.bad_cfg, "w", encoding="utf-8") as fh:
+            json.dump({"mode": "paper"}, fh)
+
+    def test_exit_bad_now_and_bad_mode_exit_2(self):
+        base = ["plan", "--symbol", "RELIANCE", "--entry", "1193.6", "--date", "2026-10-26",
+                "--or-high", "1192", "--or-low", "1175.3"]
+        code, out, err = run(exitm, base + ["--now", "not-a-time"])
+        self.assertEqual(code, 2)
+        self.assertTrue(err.startswith("exit.py: "), err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        code, out, err = run(exitm, base + ["--config", self.bad_cfg])
+        self.assertEqual(code, 2)
+        self.assertIn("mode must be one of", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_entry_bad_now_and_bad_mode_exit_2(self):
+        code, out, err = run(entry, ["check", "RELIANCE", "--key", KEY, "--offline", DAY1,
+                                     "--now", "not-a-time"])
+        self.assertEqual(code, 2)
+        self.assertTrue(err.startswith("entry.py: "), err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        code, out, err = run(entry, ["check", "RELIANCE", "--key", KEY, "--offline", DAY1,
+                                     "--config", self.bad_cfg])
+        self.assertEqual(code, 2)
+        self.assertIn("mode must be one of", err)
+        self.assertNotIn("Traceback", err)
+
+
+class DeadUsSnippets(unittest.TestCase):
+    """Dollar forms are gone; plain INR prices parse exactly as before."""
+
+    def test_dollar_prices_are_rejected(self):
+        for text in ("price:$1193.65", "pct:$1.5"):
+            with self.assertRaises(exitm.PlanError):
+                exitm.parse_stop(text)
+        with self.assertRaises(exitm.PlanError):
+            exitm.parse_target("price:$1203.55")
+        with self.assertRaises(exitm.PlanError):
+            exitm.D("$1193.65")
+
+    def test_plain_inr_prices_still_parse(self):
+        self.assertEqual(str(exitm.parse_stop("price:inr 1183.65")[1]), "1183.65")
+        self.assertEqual(str(exitm.parse_stop("price:1,183.65")[1]), "1183.65")
+        self.assertEqual(str(exitm.parse_target("price:1,203.55")[1]), "1203.55")
+        self.assertEqual(str(exitm.D("INR 1193.60")), "1193.60")
+
+
 if __name__ == "__main__":
     unittest.main()

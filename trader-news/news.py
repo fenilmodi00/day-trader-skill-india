@@ -221,8 +221,7 @@ def yahoo_symbol(ticker):
 def mention_patterns(watch):
     pats = {}
     for t, name in watch.items():
-        alts = [r"\(%s\)" % re.escape(t), r"\$%s\b" % re.escape(t),
-                r"\b%s\b" % re.escape(t)]
+        alts = [r"\(%s\)" % re.escape(t), r"\b%s\b" % re.escape(t)]
         if name and len(name) >= 4:
             alts.append(r"\b%s\b" % re.escape(name).replace(r"\ ", r"[\s-]"))
         pats[t] = re.compile("|".join(alts))
@@ -409,10 +408,19 @@ def collect_moves(source, watch, errors=None, keys=None):
         return out
     keys = keys or {}
     key_list = []
+    missing = []
     for sym in sorted(watch):
-        k = keys.get(sym) or ("NSE_EQ|%s" % sym)
+        k = keys.get(sym)
+        if not k:
+            missing.append(sym)
+            continue
         if k not in key_list:
             key_list.append(k)
+    if missing:
+        errors.append("no instrument_key for %s: run /trader-scanner so the watchlist carries the "
+                      "keys; the quote was not requested" % ", ".join(missing))
+    if not key_list:
+        return out
     raw_quotes = {}
     try:
         raw_quotes = source.quote(key_list) or {}
@@ -423,12 +431,11 @@ def collect_moves(source, watch, errors=None, keys=None):
     except (UpstoxError, OSError) as exc:
         errors.append("quote request failed: %s" % exc)
         return out
-    quotes = {}
-    for k, v in (raw_quotes or {}).items():
-        quotes[str(k).replace(":", "|")] = v
     for sym in sorted(watch):
-        k = str(keys.get(sym) or ("NSE_EQ|%s" % sym)).replace(":", "|")
-        bar = quotes.get(k)
+        k = keys.get(sym)
+        if not k:
+            continue
+        bar = raw_quotes.get(k)
         if not bar or bar.get("ltp") is None or bar.get("prev_close") is None:
             errors.append("no quote for %s" % sym)
             continue

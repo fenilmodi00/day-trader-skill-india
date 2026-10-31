@@ -79,6 +79,7 @@ product and quantities.
 | max loss | quantity x (entry minus stop) is over `account.max_loss_per_trade_inr` |
 | daily loss | the day's realized P&L in `trader/state/orders.json` is at or past `account.max_daily_loss_inr` |
 | trades | `account.max_trades_per_day` entries are already approved or placed today |
+| orders | `account.max_orders_per_day` orders are already approved or placed today (an entry and its flatten both count) |
 | reward:risk | (target minus entry) / (entry minus stop) is under `account.min_reward_risk` |
 | window | now is before `entry_start`, at or after `entry_cutoff`, or the NSE is closed (weekend or holiday) |
 | freeze | the quantity is above the instrument's freeze quantity (NIFTY 1800, from the master) |
@@ -90,6 +91,7 @@ product and quantities.
 | duplicate | a leg tag was already approved or placed today |
 | charges | the loss at the stop net of STT, exchange, SEBI, stamp duty, GST and brokerage is over the cap, even when the gross loss fits |
 | long only | the plan direction is short while `account.long_only` is true (the default) |
+| blocked | the symbol is on your `risk.blocked_symbols` list; the ASM, GSM and ban lists only warn |
 
 The charges check runs through `trader_core.charges.round_trip`: on the
 example RELIANCE plan the gross loss at the stop is Rs 248.75, charges add

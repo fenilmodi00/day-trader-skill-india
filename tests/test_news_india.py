@@ -20,11 +20,14 @@ NOW = "2026-10-26T12:00:00+05:30"  # pinned clock: after every fixture pubDate
 EXPIRED = "2026-09-25T12:00:00+05:30"  # more than 30 days before NOW
 
 
-class FakeSource(object):
-    """The seam main() injects in tests: .quote(keys), like upstox.Client.
+# The fixture quotes carry the raw v2 colon keys; the seam (upstox.Client.quote)
+# returns instrument_key keys, so the tests use the real ISIN keys.
+FIXTURE_KEYS = {"RELIANCE": "NSE_EQ|INE002A01018", "TCS": "NSE_EQ|INE467B01029"}
 
-    Returns the raw Upstox v2 key form (colons) the fixtures carry, the way
-    the real API responds; the skill normalizes keys itself."""
+
+class FakeSource(object):
+    """The seam main() injects in tests: .quote(keys) -> {instrument_key: bar},
+    keyed exactly like upstox.Client.quote (the requested instrument_key)."""
 
     def __init__(self, quotes=None, error=None):
         self.quotes = quotes or {}
@@ -35,22 +38,23 @@ class FakeSource(object):
         self.asked = list(keys)
         if self.error is not None:
             raise self.error
-        wanted = {str(k).replace(":", "|") for k in keys}
-        return {k: v for k, v in self.quotes.items()
-                if str(k).replace(":", "|") in wanted}
+        return {k: v for k, v in self.quotes.items() if k in keys}
 
 
 def quotes_from_fixture():
-    """tests/fixtures/trader-news/india/quotes.json -> client-shaped quote bars."""
+    """tests/fixtures/trader-news/india/quotes.json -> client-shaped quote bars,
+    re-keyed from the raw colon form to the real Upstox instrument keys."""
     with open(os.path.join(DIR, "quotes.json"), encoding="utf-8") as fh:
         raw = json.load(fh)["data"]
     out = {}
     for key, entry in raw.items():
+        sym = str(key).split(":")[-1].split("|")[-1].upper()
         ohlc = entry.get("ohlc", {})
-        out[key] = {"ltp": entry["last_price"], "open": ohlc.get("open"),
-                    "high": ohlc.get("high"), "low": ohlc.get("low"),
-                    "close": entry["last_price"], "prev_close": ohlc.get("close"),
-                    "volume": ohlc.get("volume"), "ts": news.parse_time(entry["timestamp"])}
+        out[FIXTURE_KEYS.get(sym, str(key).replace(":", "|"))] = {
+            "ltp": entry["last_price"], "open": ohlc.get("open"),
+            "high": ohlc.get("high"), "low": ohlc.get("low"),
+            "close": entry["last_price"], "prev_close": ohlc.get("close"),
+            "volume": ohlc.get("volume"), "ts": news.parse_time(entry["timestamp"])}
     return out
 
 
@@ -63,6 +67,10 @@ class Base(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.state_path = os.path.join(self.tmp, "state", "news.json")
         self.out_path = os.path.join(self.tmp, "trader", "news.json")
+        self.watchlist_path = os.path.join(self.tmp, "watchlist.json")
+        with open(self.watchlist_path, "w", encoding="utf-8") as fh:
+            json.dump({"symbols": [{"symbol": sym, "instrument_key": key}
+                                   for sym, key in FIXTURE_KEYS.items()]}, fh)
 
     def run_cli(self, argv, source=None):
         out, err = io.StringIO(), io.StringIO()
@@ -73,6 +81,7 @@ class Base(unittest.TestCase):
     def go(self, tickers=("RELIANCE",), feeds=None, source=None, json_mode=False):
         # state and artifact always go to the temp dir, never the repo trader/
         argv = ["--tickers"] + list(tickers) + ["--offline", DIR, "--now", NOW,
+                                                "--watchlist", self.watchlist_path,
                                                 "--state", self.state_path,
                                                 "--out", self.out_path]
         if feeds:
@@ -169,7 +178,7 @@ class Moves(Base):
         src = FakeSource(quotes=QUOTES)
         code, doc, err = self.run_two_tickers(src)
         self.assertEqual((code, err), (0, ""))
-        self.assertEqual(set(src.asked), {"NSE_EQ|RELIANCE", "NSE_EQ|TCS"})
+        self.assertEqual(set(src.asked), {FIXTURE_KEYS["RELIANCE"], FIXTURE_KEYS["TCS"]})
         moves = {m["ticker"]: m for m in doc["moves"]}
         self.assertEqual(moves["RELIANCE"]["pct"], 3.4)      # 103.4 vs 100.0
         self.assertIs(moves["RELIANCE"]["moving"], True)
@@ -177,12 +186,25 @@ class Moves(Base):
         self.assertIs(moves["TCS"]["moving"], False)
 
     def test_missing_quote_reported_not_fatal(self):
-        src = FakeSource(quotes={"NSE_EQ:RELIANCE": QUOTES["NSE_EQ:RELIANCE"]})
+        key = FIXTURE_KEYS["RELIANCE"]
+        src = FakeSource(quotes={key: QUOTES[key]})
         code, doc, err = self.run_two_tickers(src)
         self.assertEqual(code, 0)
         self.assertIn("no quote for TCS", doc["notes"])
         self.assertEqual([m["ticker"] for m in doc["moves"]], ["RELIANCE"])
         self.assertTrue(doc["items"])  # the run still carries headlines
+
+    def test_missing_instrument_key_skips_the_quote(self):
+        src = FakeSource(quotes=QUOTES)
+        code, out, err = self.go(tickers=("WIPRO",), feeds="moneycontrol.xml",
+                                 source=src, json_mode=True)
+        self.assertEqual(code, 0, err)
+        doc = json.loads(out)
+        self.assertEqual(src.asked, [])
+        self.assertTrue(any("no instrument_key for WIPRO" in n for n in doc["notes"]),
+                        doc["notes"])
+        self.assertEqual(doc["moves"], [])
+        self.assertNotIn("NSE_EQ|WIPRO", out)
 
     def test_auth_error_exits_2_with_reauth_guidance(self):
         src = FakeSource(quotes=QUOTES, error=UpstoxAuthError("token expired"))

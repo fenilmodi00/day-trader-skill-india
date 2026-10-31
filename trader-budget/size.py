@@ -286,6 +286,9 @@ def main(argv=None):
     except config.ConfigError as e:
         print("%s: %s" % (SKILL, e), file=sys.stderr)
         return 2
+    except ValueError as e:
+        print("%s: %s" % (SKILL, e), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

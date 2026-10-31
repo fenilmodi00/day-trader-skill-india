@@ -21,8 +21,10 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from trader_core import calendar as cal  # noqa: E402
 from trader_core import charges as charges_mod  # noqa: E402
 from trader_core import config, orders  # noqa: E402
+from trader_core.http import SandboxUnsupported  # noqa: E402
 from trader_core.timeutil import now_ist, parse_ist  # noqa: E402
 
 SKILL = "trader-risk"
@@ -188,6 +190,15 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
                        % (len(entries_today), trades_cap))
     checks["trades_today"] = "%d of %s" % (len(entries_today), trades_cap or "unlimited")
 
+    # orders per day: every decision recorded today counts, entries and flattens alike
+    orders_cap = int(acct.get("max_orders_per_day") or 0)
+    orders_today = [r for r in (state or {}).get("orders", [])
+                    if _trade_day(r) == today and r.get("status") in ("approved", "placed", "filled")]
+    if orders_cap and len(orders_today) >= orders_cap:
+        reasons.append("%d orders recorded today, your limit is %d a day"
+                       % (len(orders_today), orders_cap))
+    checks["orders_today"] = "%d of %s" % (len(orders_today), orders_cap or "unlimited")
+
     # reward:risk
     min_rr = _f(acct.get("min_reward_risk"))
     rr = None
@@ -198,16 +209,23 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
                            % (rr, _p(target), _p(entry), _p(stop), min_rr))
         checks["reward_risk"] = "%s (minimum %s)" % (rr, min_rr)
 
-    # entry window, IST, configurable
+    # entry window, IST, configurable; a weekend or NSE holiday has no window at all
     times = config.session_times(cfg)
     start, cutoff = times["entry_start"], times["entry_cutoff"]
     t = now.time()
-    if not (start <= t < cutoff):
+    day = now.date()
+    closed = None
+    if not cal.is_trading_day(day):
+        closed = cal.load_holidays().get(day.isoformat()) or (
+            "weekend" if cal.is_weekend(day) else "closed")
+        reasons.append("NSE is closed on %s (%s): no entries today" % (day.isoformat(), closed))
+    elif not (start <= t < cutoff):
         reasons.append("outside the entry window: entries run %s to %s IST, it is now %s"
                        % (start.strftime("%H:%M"), cutoff.strftime("%H:%M"),
                           now.strftime("%H:%M")))
-    checks["entry_window"] = "%s to %s IST, now %s" % (start.strftime("%H:%M"), cutoff.strftime("%H:%M"),
-                                                       now.strftime("%H:%M"))
+    checks["entry_window"] = ("NSE closed on %s (%s)" % (day.isoformat(), closed) if closed else
+                              "%s to %s IST, now %s" % (start.strftime("%H:%M"), cutoff.strftime("%H:%M"),
+                                                        now.strftime("%H:%M")))
 
     # freeze quantity
     if freeze and qty and qty > freeze:
@@ -268,21 +286,23 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
             checks["funds"] = "available margin %s" % money(available) if available is not None \
                 else "no usable funds answer"
         if key:
-            margins = None
+            margins, note = None, None
             try:
                 margins = broker.margins([key])
+            except SandboxUnsupported:
+                note = "margins not supplied by this seam: not checked here"
             except Exception as exc:  # noqa: BLE001
                 reasons.append("margin check failed: %s" % exc)
             else:
                 need = _margin_required(margins, key)
                 if need is None:
                     reasons.append("margin answer has no usable required margin for %s" % key)
-                elif entry and qty and need > entry * qty + EPS:
-                    warns.append("margin required %s exceeds the entry cost %s; check the margin window"
-                                 % (money(need), money(entry * qty)))
-            checks["margins"] = "required margin %s" % (money(need)
-                                                        if margins and _margin_required(margins, key)
-                                                        is not None else "unavailable")
+                else:
+                    if entry and qty and need > entry * qty + EPS:
+                        warns.append("margin required %s exceeds the entry cost %s; check the margin window"
+                                     % (money(need), money(entry * qty)))
+                    note = "required margin %s" % money(need)
+            checks["margins"] = note or "required margin unavailable"
         else:
             reasons.append("no instrument key on the plan: margin cannot be checked")
     else:
@@ -320,8 +340,12 @@ def check(plan_, cfg, now=None, broker=None, record=None, instrument=None):
         reasons.append("short plans are blocked: this skill is long only")
     checks["long_only"] = "long only" if acct.get("long_only", True) else "long and short allowed"
 
-    # optional user-supplied watch lists: warn only, never live surveillance
+    # optional user-supplied watch lists: blocked blocks, the rest warn; never live surveillance
     risk_cfg = cfg.get("risk") or {}
+    blocked = [str(s).upper() for s in risk_cfg.get("blocked_symbols") or []]
+    if sym and sym in blocked:
+        reasons.append("%s is on your risk.blocked_symbols list in the config: blocked from trading"
+                       % sym)
     for name, label in (("ban_symbols", "ban"), ("asm_symbols", "ASM"), ("gsm_symbols", "GSM")):
         listed = risk_cfg.get(name) or []
         if sym and sym in [str(s).upper() for s in listed]:
@@ -372,6 +396,26 @@ def _margin_required(margins, key):
     return None
 
 
+class FundsSeam(object):
+    """Offline broker seam from one recorded JSON file: the Upstox funds
+    envelope, or {"funds": ..., "margins": ...}. When no margins segment is
+    recorded, margins() says so and the check reports it, never invents one."""
+
+    def __init__(self, doc):
+        if isinstance(doc, dict) and ("funds" in doc or "margins" in doc):
+            self._funds, self._margins = doc.get("funds"), doc.get("margins")
+        else:
+            self._funds, self._margins = doc, None
+
+    def funds(self):
+        return self._funds
+
+    def margins(self, keys):
+        if self._margins is None:
+            raise SandboxUnsupported("the funds fixture carries no margins segment")
+        return self._margins
+
+
 # ---------------------------------------------------------------- report
 
 def report(res):
@@ -406,6 +450,10 @@ def main(argv=None, source=None):
     parser.add_argument("--plan", default=PLAN_PATH, help="the plan JSON (default trader/plan.json)")
     parser.add_argument("--config", default="trader/config.json", help="rules (default trader/config.json)")
     parser.add_argument("--instruments", help="Upstox instrument master slice, for lot, tick, freeze")
+    parser.add_argument("--broker", action="store_true",
+                        help="check funds and margins through the Upstox broker (uses your token)")
+    parser.add_argument("--funds", metavar="FILE",
+                        help="recorded Upstox funds JSON, or {funds, margins}, instead of the broker")
     parser.add_argument("--now", help="pretend it is this IST time, e.g. \"2026-10-26 10:00\"")
     parser.add_argument("--out", default="trader/state/" + RISK_STATE, help="where the verdict is recorded")
     parser.add_argument("--no-write", action="store_true", help="do not record the verdict")
@@ -427,7 +475,7 @@ def main(argv=None, source=None):
     if args.instruments:
         try:
             from trader_core import instruments as instruments_mod
-            with open(args.instruments, "r", encoding="utf-8") as fh:
+            with open(args.instruments, "rb") as fh:
                 rows = instruments_mod.load(fh.read())
             instrument = instruments_mod.find(rows, plan_.get("symbol") or "")
         except (OSError, ValueError) as exc:
@@ -442,6 +490,15 @@ def main(argv=None, source=None):
             print("%s: %s" % (SKILL, exc), file=sys.stderr)
             return 2
     broker = source
+    if broker is None and getattr(args, "funds", None):
+        try:
+            with open(args.funds, "r", encoding="utf-8") as fh:
+                funds_doc = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print("%s: cannot read the funds fixture %s: %s" % (SKILL, args.funds, exc),
+                  file=sys.stderr)
+            return 2
+        broker = FundsSeam(funds_doc)
     if broker is None and getattr(args, "broker", False):
         from trader_core.broker import UpstoxBroker
         from trader_core.upstox import Client

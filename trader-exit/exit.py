@@ -139,7 +139,7 @@ def D(x, what="a number"):
     try:
         if isinstance(x, float):
             return Decimal(repr(x))
-        return Decimal(str(x).strip().lstrip("INR ").replace(",", "").lstrip("$"))
+        return Decimal(str(x).strip().lstrip("INR ").replace(",", ""))
     except (ArithmeticError, ValueError):
         raise PlanError("%s is not a number: %r" % (what, x))
 
@@ -171,7 +171,7 @@ def parse_stop(text):
         return "or_mid", None
     if t in ("or-low", "or_low", "low"):
         return "or_low", None
-    m = re.match(r"^(price|pct|atr):\s*(?:inr\s+)?[\$]?([0-9][0-9,]*\.?[0-9]*)$", t)
+    m = re.match(r"^(price|pct|atr):\s*(?:inr\s+)?([0-9][0-9,]*\.?[0-9]*)$", t)
     if not m:
         raise PlanError("--stop is or-mid, or-low, price:X, pct:X or atr:K (got %r)" % text)
     kind, val = m.group(1), D(m.group(2), "--stop")
@@ -193,7 +193,7 @@ def parse_target(text):
         if r <= 0:
             raise PlanError("--target needs an R multiple above 0, like 1R or 2R")
         return "r", r
-    m = re.match(r"^price:\s*(?:inr\s+)?[\$]?([0-9][0-9,]*\.?[0-9]*)$", t.lower())
+    m = re.match(r"^price:\s*(?:inr\s+)?([0-9][0-9,]*\.?[0-9]*)$", t.lower())
     if m:
         return "price", D(m.group(1), "--target")
     raise PlanError("--target is 2R, 1R, 1.5R ... or price:X (got %r)" % text)
@@ -683,6 +683,9 @@ def main(argv=None, source=None):
     except PlanError as e:
         print("exit.py: %s" % e, file=sys.stderr)
         return 1
+    except (cfgmod.ConfigError, orders_mod.PlanError, ValueError) as e:
+        print("exit.py: %s" % e, file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

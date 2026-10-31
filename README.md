@@ -159,7 +159,9 @@ never in `trader/config.json`, the chat or git:
 | `UPSTOX_ANALYTICS_TOKEN` | the read-only analytics token; lasts one year, serves market data |
 
 The access token is issued per day, so it expires at 03:30 IST: every
-morning before the open, log in again and refresh it. Nothing in this pack
+morning before the open, log in again and refresh it. `python -m trader_core.auth login`
+prints the Upstox authorise URL, then `python -m trader_core.auth exchange <code>`
+writes the token to `trader/state/tokens.json`. Nothing in this pack
 refreshes tokens automatically.
 
 ## Upstox history limits

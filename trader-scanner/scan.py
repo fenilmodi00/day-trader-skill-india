@@ -271,6 +271,38 @@ def fetch_bhavcopy(day):
     raise ScanError("could not download %s: %s" % (fname, getattr(last, "reason", last) or last))
 
 
+def live_sessions(day, cache_dir, fetch=None):
+    """The last SESSIONS_NEEDED trading sessions up to and including day, for
+    the live daily scan. Each bhavcopy is cached under cache_dir and only the
+    missing days are downloaded, so the documented 20-day rules can fire; a
+    prior day NSE cannot serve is left out and sessions_supplied says so, the
+    scan day itself must be there."""
+    fetch = fetch or fetch_bhavcopy
+    anchor = day
+    while not cal.is_trading_day(anchor):
+        anchor -= datetime.timedelta(days=1)
+    wanted = cal.trading_days(anchor - datetime.timedelta(days=60), anchor)[-SESSIONS_NEEDED:]
+    sessions = []
+    for wanted_day in wanted:
+        path = os.path.join(cache_dir,
+                            "sec_bhavdata_full_%s.csv" % wanted_day.strftime("%d%m%Y"))
+        if not os.path.exists(path):
+            try:
+                text, fname = fetch(wanted_day)
+            except ScanError:
+                if wanted_day == anchor:
+                    raise
+                continue
+            if not os.path.isdir(cache_dir):
+                os.makedirs(cache_dir)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        sessions.append(read_bhav_file(path))
+    if not sessions:
+        raise ScanError("no bhavcopy for %s in %s or from NSE" % (day.isoformat(), cache_dir))
+    return sessions
+
+
 # ---------------------------------------------------------------- universe
 
 def parse_equity_l(text):
@@ -832,9 +864,10 @@ def cmd_universe(a, source=None):
     return 0 if lines else 1
 
 
-def cmd_daily(a, source=None):
+def cmd_daily(a, source=None, fetch=None):
     now = parse_ist(a.now) if a.now else now_ist()
     day = parse_day(a.date) if a.date else now.date()
+    cfg = cfgmod.load(a.config)
     if a.bhavcopy:
         sessions = load_bhav(a.bhavcopy)
         doc_source = "nse-bhavcopy-offline"
@@ -842,11 +875,11 @@ def cmd_daily(a, source=None):
         sessions = load_bhav([a.offline])
         doc_source = "nse-bhavcopy-offline"
     else:
-        text, fname = fetch_bhavcopy(day)
-        sessions = [(day, read_bhav(text, fname))]
+        cache_dir = a.bhavcopy_dir or os.path.join(cfgmod.state_dir(cfg), "bhavcopy")
+        sessions = live_sessions(day, cache_dir, fetch)
         doc_source = "nse-bhavcopy"
     universe = read_universe(a.universe or DEFAULT_UNIVERSE)
-    master = load_master(a, cfg=cfgmod.load(a.config), live=not a.offline)
+    master = load_master(a, cfg=cfg, live=not a.offline)
     mindex = instruments_mod.index(master) if master else {}
     entries, counts, final_day = scan_daily(sessions, universe, mindex, a.min_price)
     as_of = fmt_ist(now)
@@ -980,7 +1013,7 @@ def cmd_orb(a, source=None):
 
 # ---------------------------------------------------------------- main
 
-def main(argv=None, source=None):
+def main(argv=None, source=None, fetch=None):
     ap = argparse.ArgumentParser(
         description="Chart Scanner (trader-scanner): NSE universe, bhavcopy daily scan, "
                     "Upstox opening-range breakout.")
@@ -1017,7 +1050,9 @@ def main(argv=None, source=None):
     p = sub.add_parser("daily", help="setup scan from NSE bhavcopy closes")
     common(p)
     p.add_argument("--bhavcopy", nargs="+", metavar="PATH", help="one or more sec_bhavdata_full "
-                                                                 "CSV files, or a folder of prior days")
+                                                                "CSV files, or a folder of prior days")
+    p.add_argument("--bhavcopy-dir", dest="bhavcopy_dir", metavar="DIR",
+                   help="cache for downloaded bhavcopies (default <state_dir>/bhavcopy)")
     p.add_argument("--date", help="trading day, YYYY-MM-DD (default: today)")
     p.add_argument("--min-price", type=float, default=0.0, help="price floor")
 
@@ -1032,7 +1067,9 @@ def main(argv=None, source=None):
         return 1
     a._t0 = time.time()
     try:
-        return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb}[a.cmd](a, source=source)
+        if a.cmd == "daily":
+            return cmd_daily(a, source=source, fetch=fetch)
+        return {"universe": cmd_universe, "orb": cmd_orb}[a.cmd](a, source=source)
     except ScanError as e:
         print("scan.py: %s" % e, file=sys.stderr)
         return 2

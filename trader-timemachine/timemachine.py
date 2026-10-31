@@ -438,7 +438,7 @@ def load_plan(a, now_ist):
         raw = {"symbol": a.symbol, "side": a.side, "date": a.date or now_ist.date().isoformat(),
                "entry": a.entry, "stop": a.stop, "target": a.target, "entry_time": a.entry_time,
                "setup": a.setup, "opening_range": {"minutes": a.or_minutes}, "stop_rule": a.stop_rule,
-               "interval": "5m"}
+               "interval": "5m", "instrument_key": getattr(a, "key", None)}
         src = "flags"
     else:
         if not os.path.exists(a.plan):
@@ -451,6 +451,8 @@ def load_plan(a, now_ist):
             raise TMError("%s is not valid JSON: %s" % (a.plan, e))
         if not isinstance(raw, dict):
             raise TMError("%s is not a plan" % a.plan)
+        if getattr(a, "key", None):
+            raw["instrument_key"] = a.key
         src = a.plan
     return normalize_plan(raw, src)
 
@@ -675,7 +677,7 @@ def time_machine(bars5, plan, now_ist, replays=10000, seed=19, window=2, until=N
         "window_start": sessions[0][0],
         "window_end": sessions[-1][0],
         "caveat": caveat,
-        "data": {"symbol": sym, "instrument_key": instrument_key or ("NSE_EQ|" + sym),
+        "data": {"symbol": sym, "instrument_key": instrument_key,
                  "interval": "5m", "resampled_from": "1m", "bars_5m": len(bars5),
                  "short_sessions_left_out": short},
         "plan": plan_out,
@@ -815,7 +817,10 @@ def _write(path, doc):
 def compute(a, source=None):
     now = parse_now(a.now)
     plan = load_plan(a, now)
-    key = plan.get("instrument_key") or ("NSE_EQ|" + plan["symbol"])
+    key = plan.get("instrument_key")
+    if not key:
+        raise TMError("no instrument_key for %s: run trader-scanner universe --write or pass --key"
+                      % plan["symbol"])
     if a.offline:
         bars1, label = offline_bars(a.offline, plan["symbol"]), "offline"
     else:
@@ -869,6 +874,7 @@ def main(argv=None, source=None):
     def common(p):
         p.add_argument("--plan", default="trader/plan.json", help="the plan from trader-exit")
         p.add_argument("--symbol", help="or give the plan as flags: ticker")
+        p.add_argument("--key", help="Upstox instrument_key, e.g. NSE_EQ|INE002A01018")
         p.add_argument("--side", default="buy", choices=["buy", "sell"])
         p.add_argument("--date", help="the plan's day, YYYY-MM-DD (default today, IST)")
         p.add_argument("--entry", type=float)

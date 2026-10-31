@@ -294,7 +294,7 @@ def risk_gate(o, risk, today):
     if rec["verdict"] != "PASS":
         raise TicketError("gate 1 (risk): trader-risk BLOCKED this plan: %s"
                           % "; ".join(rec["reasons"][:3]))
-    if order_hash(entry_order(rec["plan"])) != order_hash(o):
+    if order_hash(order_from_plan(rec["plan"], o.get("kind"))) != order_hash(o):
         raise TicketError("gate 1 (risk): the PASS on file is for a different order (the plan "
                           "changed since the check); run trader-risk check.py again")
     return rec
@@ -331,7 +331,7 @@ def ticket_view(o, ticket, risk, today):
         ready = False
         status = "BLOCKED by trader-risk: " + "; ".join(rec["reasons"][:3])
     else:
-        if order_hash(entry_order(rec["plan"])) != fp:
+        if order_hash(order_from_plan(rec["plan"], view_kind)) != fp:
             ready, status = False, ("NOT READY: the PASS is for a different order (the plan changed); "
                                     "run check.py again")
         else:
