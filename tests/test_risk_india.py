@@ -568,10 +568,11 @@ class Cli(unittest.TestCase):
                 return 200, json.dumps({"status": "success",
                                         "data": {"equity": {"available_margin": 50000.0}}})
             if url.endswith(broker_mod.MARGINS_PATH):
-                # the risk check reads a flat envelope data.instruments list; a
-                # real Upstox envelope nests the list under data.equity (unparsed bug)
-                return 200, json.dumps({"status": "success", "data": {"instruments": [
-                    {"instrument_key": KEY, "total_margin": 29840.0}]}})
+                return 200, json.dumps({"status": "success", "data": {"equity": {
+                    "total_margin_required": 29840.0,
+                    "total_margin_available": 50000.0,
+                    "shortfall": 0.0,
+                    "instruments": [{"instrument_key": KEY, "total_margin": 29840.0}]}}})
             return 404, ""
 
         out, err = io.StringIO(), io.StringIO()

@@ -408,18 +408,31 @@ def _available_margin(funds):
 
 
 def _margin_required(margins, key):
-    """total margin required for key, across known Upstox margin shapes."""
+    """total margin required for key, across known Upstox margin shapes.
+
+    UpstoxBroker returns the documented envelope, so the instrument list sits
+    under data.equity.instruments (or data.commodity.instruments); the offline
+    seams may hand over the body, or a segment, already unwrapped."""
     if not isinstance(margins, dict):
         return None
-    for cont in ("equity", "commodity"):
-        data = margins.get(cont)
-        if isinstance(data, dict):
-            for inst in data.get("instruments") or []:
-                if isinstance(inst, dict) and inst.get("instrument_key") == key:
-                    return _f(inst.get("total_margin"))
-    for inst in (margins.get("data") or {}).get("instruments") or []:
-        if isinstance(inst, dict) and inst.get("instrument_key") == key:
-            return _f(inst.get("total_margin"))
+    docs = [margins]
+    body = margins.get("data")
+    if isinstance(body, dict):
+        docs.insert(0, body)
+    for doc in docs:
+        lists = [doc.get("instruments")]
+        for cont in ("equity", "commodity"):
+            seg = doc.get(cont)
+            if isinstance(seg, dict):
+                lists.append(seg.get("instruments"))
+        for instruments in lists:
+            for inst in instruments or []:
+                if not isinstance(inst, dict) or inst.get("instrument_key") != key:
+                    continue
+                for field in ("total_margin", "required_margin"):
+                    value = _f(inst.get(field))
+                    if value is not None:
+                        return value
     return None
 
 
