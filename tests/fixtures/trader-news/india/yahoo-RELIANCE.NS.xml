@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Yahoo! Finance: RELIANCE.NS News</title>
+    <item>
+      <title>Reliance Industries announces Q1 results, profit rises 10%</title>
+      <link>https://finance.yahoo.com/news/reliance-q1-results-1.html</link>
+      <guid isPermaLink="false">g1</guid>
+      <description>Reliance Industries reported quarterly earnings with higher revenue.</description>
+      <pubDate>Mon, 26 Oct 2026 09:30:00 +0530</pubDate>
+    </item>
+    <item>
+      <title>Reliance wins Rs 500 crore order from ONGC</title>
+      <link>https://finance.yahoo.com/news/reliance-order-ongc-2.html</link>
+      <guid isPermaLink="false">g2</guid>
+      <description>Reliance secures a contract from ONGC.</description>
+      <pubDate>Mon, 26 Oct 2026 05:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Reliance board to meet for dividend and bonus issue</title>
+      <link>https://finance.yahoo.com/news/reliance-board-dividend-3.html</link>
+      <guid isPermaLink="false">g3</guid>
+      <description>Board meeting to consider dividend and bonus shares.</description>
+      <pubDate>Mon, 26 Oct 2026 10:00:00 +0530</pubDate>
+    </item>
+    <item>
+      <title>SEBI approves Reliance retail demerger; management change at CFO</title>
+      <link>https://finance.yahoo.com/news/reliance-sebi-cfo-4.html</link>
+      <guid isPermaLink="false">g4</guid>
+      <description>Regulatory nod and CFO appointment.</description>
+      <pubDate>Mon, 26 Oct 2026 11:00:00 +0530</pubDate>
+    </item>
+  </channel>
+</rss>
