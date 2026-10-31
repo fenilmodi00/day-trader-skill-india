@@ -13,7 +13,7 @@ description: >-
   INR, all times are IST, the market is NSE and the broker is Upstox. Use
   when the user says "how many shares", "size this trade", "how much should
   I buy", "I have Rs 50,000", "I only want to risk Rs 250 a trade", "set my
-  rules", or after /trader-exit writes a plan.
+  rules", or after /trader-exit makes a plan.
 argument-hint: "[budget in rupees]"
 ---
 
@@ -34,6 +34,7 @@ python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json
 python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json --budget 200000 --max-loss 800
 python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json --instruments instruments.json
 python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json --now "2026-10-26 10:00"
+python3 "${CLAUDE_SKILL_DIR}/size.py" --config trader-budget/config.example.json --write
 ```
 
 `--now "2026-10-26 10:00"` pins the clock, IST. A plan dated for another day
@@ -44,13 +45,15 @@ is refused: make a new one with trader-exit. Exit codes: 0 sized, 1 refused
 
 | file | what |
 | --- | --- |
-| `trader/plan.json` | the trade: entry, stop, target, setup, date (trader-exit writes it) |
+| `trader/plan.json` | the trade: entry, stop, target, setup, date. trader-exit prints it and saves it only with `--write`, to this same default path |
 | `trader/config.json` | the rules (start from `config.example.json` in this folder) |
 | `--instruments` file | a recorded Upstox instrument master slice: lot, tick, freeze |
 | stdout | the sized plan: the report, or the full JSON with `--json` |
 
-It writes no file. The sized plan goes to stdout; trader-risk checks it and
-trader-broker turns it into orders only after the user says yes.
+It writes no file unless you pass `--write`: then it saves the sized plan,
+the exact JSON trader-risk checks and trader-broker turns into orders, to
+`trader/plan.json` (or the PATH you give). Without `--write` the sized plan
+goes to stdout only. Nothing is placed either way.
 
 ## Step 1: set the rules once
 
@@ -107,7 +110,8 @@ Show the three limits, which one decided the size (`bound_by` in the JSON),
 the quantity in units and lots, the cost in INR and the max loss at the
 stop. Say plainly that a stop is an order, not a promise: in a fast market
 it can fill below the stop, and charges make the real loss a little bigger.
-Then hand over to `/trader-risk`.
+Save it with `--write` so trader-risk checks exactly the plan trader-broker
+will place, then hand over to `/trader-risk`.
 
 ## Example: the reel
 

@@ -289,6 +289,56 @@ class PlanCLI(unittest.TestCase):
         self.assertEqual(json.loads(text)["stop"], 1183.65)
 
 
+class AtrStop(unittest.TestCase):
+    """--stop atr:K reads the session's 5m bars through the one resample helper
+    and stops K x ATR under the entry; the default write path is trader/plan.json."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dt-exit-atr-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.cfg = os.path.join(self.tmp, "config.json")          # absent: the defaults stand
+
+    def argv(self, write=None):
+        argv = ["plan", "--symbol", "RELIANCE", "--key", KEY, "--entry", "1193.6",
+                "--or-high", "1192.0", "--or-low", "1175.3", "--setup", "orb",
+                "--stop", "atr:1.5", "--offline", DAY1, "--date", "2026-10-26",
+                "--time", "10:00", "--entry-bar", "8", "--now", "2026-10-26 10:05",
+                "--master", MASTER, "--target", "1R", "--budget", "50000",
+                "--config", self.cfg, "--json", "--write"]
+        return argv if write is None else argv + [write]
+
+    def test_atr_stop_is_rounded_and_the_legs_validate(self):
+        out = os.path.join(self.tmp, "plan.json")
+        code, text, err = run(exitm, self.argv(out))
+        self.assertEqual(code, 0, err)                           # no NameError, no refusal
+        plan = json.loads(text)
+        self.assertEqual(plan["stop_rule"], "atr")
+        self.assertEqual(plan["atr_bars"], 9)                    # slots 0..8, the entry bar last
+        self.assertAlmostEqual(plan["atr"], 6.3222, places=4)
+        self.assertEqual(plan["stop"], 1184.1)                   # entry - 1.5 x ATR, tick-rounded down
+        self.assertEqual(plan["target"], 1203.1)                 # 1R above the rounded risk
+        self.assertTrue(orders_mod.on_grid(plan["stop"], 0.05))
+        self.assertTrue(orders_mod.on_grid(plan["target"], 0.05))
+        self.assertEqual([one["role"] for one in plan["legs"]], ["entry", "stop", "target"])
+        rows = instruments_mod.load(open(MASTER, "rb").read())
+        inst = instruments_mod.find(rows, "RELIANCE")
+        self.assertEqual(orders_mod.validate_plan(plan, inst, {}), [])
+
+    def test_write_without_a_path_uses_the_shared_plan_path(self):
+        old = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            code, text, err = run(exitm, self.argv())
+        finally:
+            os.chdir(old)
+        self.assertEqual(code, 0, err)
+        saved = os.path.join(self.tmp, "trader", "plan.json")
+        self.assertTrue(os.path.exists(saved), saved)
+        with open(saved, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["stop"], 1184.1)
+        self.assertEqual(json.loads(text)["stop"], 1184.1)
+
+
 class CliBoundary(unittest.TestCase):
     """Bad user input exits 2 with one line, never a traceback."""
 
