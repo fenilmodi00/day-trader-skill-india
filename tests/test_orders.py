@@ -338,6 +338,9 @@ class ChargesTest(unittest.TestCase):
 class BrokerTest(TempStateCase):
     def setUp(self):
         TempStateCase.setUp(self)
+        self._clock = mock_now(broker_mod, datetime.datetime(
+            2026, 10, 26, 10, 0, tzinfo=core().IST))
+        self._clock.__enter__()
         self.fx = read_fixture()
         self.transport = Transport({
             "/v3/order/place": self.fx["place"],
@@ -352,6 +355,9 @@ class BrokerTest(TempStateCase):
         })
         self.client = Client(cfg=self.cfg, transport=self.transport, token="test-token")
         self.broker = broker_mod.UpstoxBroker(client=self.client, cfg=self.cfg)
+
+    def tearDown(self):
+        self._clock.__exit__()
 
     def place_payload(self, **over):
         payload = orders.leg(KEY, "BUY", 25, "LIMIT", product="I", price=1193.6,
