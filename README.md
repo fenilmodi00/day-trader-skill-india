@@ -46,9 +46,11 @@ Project-local instead of global: copy the same folders into your repo's
 it. No Claude Code at all? Paste any single `SKILL.md` at the top of a chat
 and it runs as a mode. You lose the Python tools, but the method works.
 
-The tools need Python 3.8 or newer. Nothing to pip install. All network
-access goes through `trader_core`, so tests and every `--offline` flag run
-without a token.
+The tools need Python 3.8 or newer. Nothing to pip install. Upstox market
+data and orders go through `trader_core`'s HTTP seam. The news RSS feeds and
+the scanner's NSE archive downloads use plain `urllib`, with a URL-free
+User-Agent because NSE stalls requests whose User-Agent carries a URL. Tests
+and every `--offline` flag run without a token.
 
 ## The ten
 
@@ -97,13 +99,14 @@ fixtures reproduce:
    only about 15 to 20. That is the point of looking before you risk a rupee.
 6. **`/trader-budget`** with a 50,000 rupee account and a 250 rupee max loss
    per trade: 250 / 9.95 = 25 shares (29,840 rupees at entry). If the stop
-   fills at 1183.65, the loss is 248.75 before charges. It writes one
-   two-leg MIS order: buy 25 RELIANCE intraday, stop-loss 1183.65,
-   take-profit 1203.55.
+   fills at 1183.65, the loss is 248.75 before charges. With `--write` it
+   saves one three-leg intraday MIS plan to `trader/plan.json`: buy 25
+   RELIANCE, stop-loss 1183.65, take-profit 1203.55.
 7. **`/trader-risk`** checks it against your limits: the max loss, the daily
    loss limit, trades per day, reward to risk, the entry window, the flat-by
-   time, lot size, tick size and freeze quantity. PASS or BLOCK, with the
-   reason.
+   time, lot size, tick size and freeze quantity. It also requires the
+   intraday MIS product I; `risk.mis_products` defaults to `["I"]`. PASS or
+   BLOCK, with the reason.
 8. **`/trader-broker`** shows you the exact Upstox v3 payload in plain words.
    You type yes for that exact order. Sandbox is the default; live mode needs
    the config change and the typed phrase below, and Claude's own
@@ -121,12 +124,12 @@ python3 trader-scanner/scan.py daily                     # today's bhavcopy -> t
 python3 trader-news/news.py --tickers RELIANCE --hours 12    # Indian headlines, today's move
 python3 trader-entry/entry.py check RELIANCE --key "NSE_EQ|INE002A01018"   # waiting / triggered / expired
 python3 trader-entry/entry.py watch RELIANCE --every 30  # bar by bar until it triggers
-python3 trader-exit/exit.py plan --from trader/entry.json --write    # -> trader/exit.json
+python3 trader-exit/exit.py plan --from trader/entry.json --write    # -> trader/plan.json
 python3 trader-timemachine/timemachine.py run --write    # 10,000 replays + the history
-python3 trader-budget/size.py --config trader-budget/config.example.json --write   # -> the order plan
+python3 trader-budget/size.py --config trader-budget/config.example.json --instruments instruments.json --write   # -> trader/plan.json, sized
 python3 trader-risk/check.py --config trader-budget/config.example.json            # PASS / BLOCK
 python3 trader-broker/ticket.py show                     # the tickets, READY or not
-python3 trader-alerts/alerts.py add --from-plan          # stop, target, flat by 15:10
+python3 trader-alerts/alerts.py add --from-plan --plan trader/plan.json   # stop, target, flat by 15:10
 python3 trader-alerts/alerts.py check                    # rings what hit, once
 python3 trader-analyst/facts.py RELIANCE --xbrl RELIANCE-results.xml   # quarters, growth, EPS
 ```
@@ -178,8 +181,10 @@ Historical candle limits on Upstox, which every skill respects:
 
 That is why the Time Machine's window shrinks: it replays from 1-minute bars
 resampled to 5-minute, so it sees at most about one month of sessions, 15 to
-20, never fewer than 15, and it says how many it used. The current day has a
-live 5-minute intraday endpoint, which the entry timer uses.
+20, never fewer than 15, and it says how many it used. The current day comes
+from the live intraday endpoint at 1-minute resolution: the entry timer
+requests 1-minute bars and resamples them to 5-minute itself. The client can
+ask that endpoint for 5-minute bars too, but the entry timer does not.
 
 ## The IST session
 
@@ -213,7 +218,7 @@ example numbers, not a quote. On an intraday round trip, buy 25 RELIANCE at
 | stamp duty | the state, buy side only | 0.90 |
 | GST | 18% on brokerage + exchange + SEBI | 5.72 |
 
-46.00 rupees of charges on a 248.75 gross: 202.81 net. At the stop instead of
+45.94 rupees of charges on a 248.75 gross: 202.81 net. At the stop instead of
 the target the same trade is 294.28 out of pocket, charges included. The
 risk manager shows you charges-adjusted numbers before you approve anything.
 
