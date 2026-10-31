@@ -235,7 +235,7 @@ class PositiveLimits(unittest.TestCase):
         self.assertEqual(str(cm.exception), "budget_inr must be a positive number, got 'fifty'")
 
     def test_a_plan_without_a_date_is_refused(self):
-        for p in (rel_legs_no_date(), rel_legs_no_date() | {"date": None}, rel_legs_no_date() | {"date": ""}):
+        for p in (rel_legs_no_date(), dict(rel_legs_no_date(), date=None), dict(rel_legs_no_date(), date="")):
             with self.assertRaises(size.SizeError) as cm:
                 size.size_plan(p, base_cfg(), REL, today=MON)
             self.assertEqual(str(cm.exception), "the plan has no date: make it with trader-exit")
