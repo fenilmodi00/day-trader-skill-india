@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Moneycontrol Markets</title>
+    <item>
+      <title>TCS declares interim dividend, board meeting scheduled</title>
+      <link>https://www.moneycontrol.com/news/tcs-dividend-1.html</link>
+      <guid isPermaLink="false">m1</guid>
+      <description>TCS board to meet for dividend.</description>
+      <pubDate>Mon, 26 Oct 2026 09:45:00 +0530</pubDate>
+    </item>
+    <item>
+      <title>Reliance Industries announces Q1 results, profit rises 10%</title>
+      <link>https://finance.yahoo.com/news/reliance-q1-results-1.html</link>
+      <guid isPermaLink="false">m-dup</guid>
+      <description>Duplicate story across feeds.</description>
+      <pubDate>Mon, 26 Oct 2026 09:30:00 +0530</pubDate>
+    </item>
+  </channel>
+</rss>
