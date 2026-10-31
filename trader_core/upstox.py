@@ -14,7 +14,7 @@ from trader_core import instruments as instruments_mod
 
 QUOTE_CHUNK = 500
 SESSION_MINUTES = 375  # 09:15 to 15:30
-INSTRUMENT_MASTER_URL = "https://assets.upstox.com/market-data/instrument-master/json/%s.json.gz"
+INSTRUMENT_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/%s.json.gz"
 MARKET_DATA_PATHS = ("/market-quote", "/historical-candle", "/market-data", "/market-instrument",
                      "/v2/market-quote", "/v3/historical-candle", "/v2/market-data")
 
