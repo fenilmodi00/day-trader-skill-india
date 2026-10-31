@@ -1,6 +1,7 @@
 """T5: trader-entry and trader-exit, the India port. IST ORB trigger, tick-rounded
 stops and targets, flat-by 15:10. No network: recorded Upstox fixtures only."""
 
+import copy
 import datetime
 import json
 import os
@@ -357,6 +358,57 @@ class AtrStop(unittest.TestCase):
             self.assertEqual(json.load(fh)["stop"], 1184.1)
         self.assertEqual(json.loads(text)["stop"], 1184.1)
 
+    def test_atr_without_an_entry_bar_stops_at_the_entry_time(self):
+        # no entry bar: only the bars that closed at or before the entry time
+        # count, however late --now is. The file holds the whole 2026-10-26
+        # session; the 10:00 entry sees the 9 bars through 09:55, never later ones.
+        flags = ["--symbol", "RELIANCE", "--key", KEY, "--entry", "1193.6", "--date", "2026-10-26",
+                 "--time", "10:00", "--or-high", "1192.0", "--or-low", "1175.3", "--setup", "orb",
+                 "--master", MASTER, "--target", "1R", "--config", self.cfg]
+        code, text, err = run(exitm, ["plan", "--now", "2026-10-26 12:00", "--stop", "atr:1.5",
+                                      "--offline", DAY1, "--json"] + flags)
+        self.assertEqual(code, 0, err)
+        p = json.loads(text)
+        self.assertEqual((p["atr_bars"], p["entry_bar"]), (9, None))
+        self.assertAlmostEqual(p["atr"], 6.3222, places=4)
+        # a later --now leaks nothing: the entry time is the cutoff either way
+        code, text, err = run(exitm, ["plan", "--now", "2026-10-26 15:29", "--stop", "atr:1.5",
+                                      "--offline", DAY1, "--json"] + flags)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((json.loads(text)["atr_bars"], json.loads(text)["atr"]), (9, 6.3222))
+        # neither a time nor a bar: the ATR is the last 14 closed bars of the data
+        # (no --now, so no clock cutoff beyond the recording itself)
+        plain = flags[:8] + flags[10:]                  # without the --time pair
+        code, text, err = run(exitm, ["plan", "--stop", "atr:1.5", "--offline", DAY1, "--json"] + plain)
+        self.assertEqual(code, 0, err)
+        q = json.loads(text)
+        self.assertEqual(q["atr_bars"], 14)
+        self.assertAlmostEqual(q["atr"], 1.6643, places=4)
+        # an --now earlier than the entry cuts at the clock: 09:45 has seen 6 bars
+        code, text, err = run(exitm, ["plan", "--now", "2026-10-26 09:45", "--stop", "atr:1.5",
+                                      "--offline", DAY1, "--json"] + flags)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((json.loads(text)["atr_bars"], json.loads(text)["atr"]), (6, 6.5))
+        # an entry before any 5m bar closes has no bars to average
+        for when in ("9:15", "9:19"):
+            code, _, err = run(exitm, ["plan", "--now", "2026-10-26 10:05", "--stop", "atr:1.5",
+                                       "--offline", DAY1, "--json"] + plain + ["--time", when])
+            self.assertEqual(code, 1)
+            self.assertIn("before the first 5m bar closes", err)
+
+    def test_an_unexpected_error_is_one_plain_line(self):
+        # a plan whose date is not a string: a TypeError inside describe, not a traceback
+        out = os.path.join(self.tmp, "plan.json")
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump({"symbol": "RELIANCE", "date": 20261026, "entry": 1193.6, "stop": 1183.65,
+                       "target": 1203.55, "risk_per_share": 9.95, "reward_risk": 1.0,
+                       "flat_by": "15:10"}, fh)
+        code, _, err = run(exitm, ["show", "--plan", out])
+        self.assertEqual(code, 1)
+        self.assertEqual(len(err.strip().splitlines()), 1, err)
+        self.assertTrue(err.startswith("exit.py: could not finish (TypeError"), err)
+        self.assertNotIn("Traceback", err)
+
 
 class CliBoundary(unittest.TestCase):
     """Bad user input exits 2 with one line, never a traceback."""
@@ -393,6 +445,48 @@ class CliBoundary(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("mode must be one of", err)
         self.assertNotIn("Traceback", err)
+
+
+class MissingBar(unittest.TestCase):
+    """#23 regression: a gap in the data (the 09:15 bar never arrives) must not
+    look like a complete range just because enough time has passed. The range
+    is missing a bar, so nothing triggers. Test-only: entry.py already guards."""
+
+    def drop_bar(self, slot):
+        """Remove one 1m row set (the bars of 5m bucket `slot`) to simulate a data gap."""
+        base = json.load(open(DAY1, encoding="utf-8"))
+        day = datetime.date.fromisoformat(str(self.day))
+        open_dt = datetime.datetime.combine(day, datetime.time(9, 15), tzinfo=IST)
+        bars = [b for b in entry.bars_of(base["data"]["candles"])
+                if b["dt"].date() != day
+                or int((b["dt"] - open_dt).total_seconds()) // 60 // 5 != slot]
+        doc = copy.deepcopy(base)
+        doc["data"]["candles"] = [[b["dt"].isoformat(), b["o"], b["h"], b["l"], b["c"], b["v"]]
+                                  for b in bars]
+        return doc
+
+    def run_at(self, doc, hh, mm):
+        path = os.path.join(self.tmp, "gap.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        src, _ = make_source(path)
+        return evaluate(src, self.day, hh, mm)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dt-missing-bar-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.src, self.day = make_source(DAY1)
+
+    def test_a_missing_opening_range_bar_is_not_complete_and_does_not_trigger(self):
+        doc = self.drop_bar(0)                           # the 09:15 bar never arrived
+        r = self.run_at(doc, 9, 50)
+        self.assertEqual(r["opening_range"]["bars"], 2)
+        self.assertFalse(r["opening_range"]["complete"])
+        self.assertEqual(r["status"], "no-data")
+        self.assertIn("opening-range bars", r["reason"])
+        r = self.run_at(doc, 10, 15)                     # would have triggered with the full range
+        self.assertEqual(r["status"], "no-data")
+        self.assertIsNone(r["trigger"])
 
 
 class DeadUsSnippets(unittest.TestCase):

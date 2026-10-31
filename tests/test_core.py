@@ -20,6 +20,12 @@ def ist(y, m, d, hh, mm):
     return datetime.datetime(y, m, d, hh, mm, tzinfo=IST)
 
 
+def ist_from_today(hh, mm):
+    """Today's IST date at hh:mm."""
+    today = timeutil.now_ist().date()
+    return datetime.datetime.combine(today, datetime.time(hh, mm), tzinfo=IST)
+
+
 class TimeUtil(unittest.TestCase):
     def test_now_ist_is_aware_at_fixed_offset(self):
         now = timeutil.now_ist()
@@ -38,6 +44,21 @@ class TimeUtil(unittest.TestCase):
         self.assertEqual(timeutil.parse_ist("2026-10-26T04:30:00Z"), ist(2026, 10, 26, 10, 0))
         with self.assertRaises(ValueError):
             timeutil.parse_ist("not a time")
+
+    def test_parse_ist_bare_hhmm_is_today_in_ist(self):
+        today = timeutil.now_ist().date().isoformat()
+        self.assertEqual(timeutil.parse_ist("9:30"),
+                         timeutil.parse_ist("%s 09:30" % today))
+        self.assertEqual(timeutil.parse_ist("10:15"), ist_from_today(10, 15))
+        self.assertEqual(timeutil.parse_ist(" 09:05 "), ist_from_today(9, 5))
+
+    def test_parse_ist_trailing_ist_suffix(self):
+        self.assertEqual(timeutil.parse_ist("2026-10-26 10:15 IST"), ist(2026, 10, 26, 10, 15))
+        self.assertEqual(timeutil.parse_ist("2026-10-26 10:15 ist"), ist(2026, 10, 26, 10, 15))
+        self.assertEqual(timeutil.parse_ist("2026-10-26T10:15:00 IST"), ist(2026, 10, 26, 10, 15))
+        today = timeutil.now_ist().date().isoformat()
+        self.assertEqual(timeutil.parse_ist("10:15 ist"), timeutil.parse_ist("%s 10:15" % today))
+        self.assertEqual(timeutil.parse_ist("2026-10-26T04:30:00Z"), ist(2026, 10, 26, 10, 0))
 
     def test_fmt_ist(self):
         self.assertEqual(timeutil.fmt_ist(MON), "2026-10-26 10:00 IST")

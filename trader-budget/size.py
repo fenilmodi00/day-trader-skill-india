@@ -10,6 +10,11 @@ trader_core.orders, ready for trader-risk and trader-broker. It prints the
 sized plan and, only with --write, saves it as the plan JSON those two read
 (trader/plan.json by default).
 
+Refusals, never a sized order: a plan with no date, and a budget or
+max_loss_per_trade_inr that is 0, negative or not a number. With --write, a
+refusal also removes an earlier sized plan at the --write path, so
+trader-risk cannot pass yesterday's order.
+
 Standard library only, Python 3.8, no network in this module.
 """
 
@@ -32,6 +37,15 @@ EPS = 1e-9
 
 class SizeError(Exception):
     pass
+
+
+def positive_number(key, value):
+    """A limit that must be a positive number. 0, negative, missing or not a
+    number is a refusal, never "no limit"."""
+    f = None if isinstance(value, bool) else as_float(value)
+    if f is None or f <= 0:
+        raise SizeError("%s must be a positive number, got %r" % (key, value))
+    return f
 
 
 # ---------------------------------------------------------------- helpers
@@ -75,7 +89,9 @@ def size_plan(plan_doc, cfg, instrument, budget=None, max_loss=None, product=Non
     sym = str(plan_doc.get("symbol") or "").strip().upper()
     if not sym:
         raise SizeError("the plan has no symbol (run trader-exit)")
-    if plan_doc.get("date") and plan_doc["date"] != today:
+    if not plan_doc.get("date"):
+        raise SizeError("the plan has no date: make it with trader-exit")
+    if str(plan_doc["date"]) != today:
         raise SizeError("the plan is for %s and today is %s IST: make a new plan with trader-exit"
                         % (plan_doc["date"], today))
     if instrument is None:
@@ -94,12 +110,10 @@ def size_plan(plan_doc, cfg, instrument, budget=None, max_loss=None, product=Non
     freeze = as_float(instrument.get("freeze_quantity"))
 
     acct = config.limits(cfg)
-    budget = as_float(budget if budget is not None else acct.get("budget_inr"))
-    max_loss_inr = as_float(max_loss if max_loss is not None else acct.get("max_loss_per_trade_inr"))
-    if not budget or budget <= 0:
-        raise SizeError("no budget: pass --budget or set account.budget_inr in the config")
-    if not max_loss_inr or max_loss_inr <= 0:
-        raise SizeError("no max loss: set account.max_loss_per_trade_inr in the config")
+    budget = positive_number("budget_inr",
+                             budget if budget is not None else acct.get("budget_inr"))
+    max_loss_inr = positive_number("max_loss_per_trade_inr",
+                                   max_loss if max_loss is not None else acct.get("max_loss_per_trade_inr"))
 
     product = product or cfg.get("products", {}).get("default") or "I"
 
@@ -185,6 +199,16 @@ def size_plan(plan_doc, cfg, instrument, budget=None, max_loss=None, product=Non
     return plan_out
 
 
+def drop_stale(path):
+    """A refused sizing with --write: remove the earlier proposal at the --write
+    path, so trader-risk cannot pass yesterday's order. Returns the line to say,
+    or None when there was nothing to remove."""
+    if not path or not os.path.exists(path):
+        return None
+    os.remove(path)
+    return "Removed the stale proposal at %s: a refused sizing leaves no order for trader-risk to pass." % path
+
+
 def _legs(key, qty, product, entry, stop, target, tick, plan_doc):
     """The three v3 payloads: entry LIMIT, protective stop SL, target LIMIT."""
     tag = str(plan_doc.get("setup") or "orb")[:20]
@@ -240,8 +264,14 @@ def run(a):
                             "(a recorded Upstox master slice)" % sym)
     except ValueError as e:
         raise SizeError(str(e))
-    s = size_plan(plan_doc, cfg, instrument, budget=a.budget, max_loss=a.max_loss, product=a.product,
-                  today=parse_ist(a.now).date().isoformat() if a.now else None)
+    try:
+        s = size_plan(plan_doc, cfg, instrument, budget=a.budget, max_loss=a.max_loss, product=a.product,
+                      today=parse_ist(a.now).date().isoformat() if a.now else None)
+    except SizeError:
+        line = drop_stale(a.write)
+        if line:
+            print(line, file=sys.stderr)
+        raise
     wrote = bool(a.write and s.get("quantity"))
     if wrote:
         try:
@@ -253,6 +283,10 @@ def run(a):
                 fh.write("\n")
         except OSError as exc:
             raise SizeError("cannot write %s: %s" % (a.write, exc))
+    elif a.write:
+        line = drop_stale(a.write)
+        if line:
+            print(line, file=sys.stderr)
     if a.json:
         doc = {"sizing": {k: v for k, v in s.items() if k != "legs"}, "plan": s, "legs": s["legs"]}
         print(json.dumps(doc, indent=2))
@@ -293,6 +327,10 @@ def main(argv=None):
     except ValueError as e:
         print("%s: %s" % (SKILL, e), file=sys.stderr)
         return 2
+    except (TypeError, KeyError, AttributeError, OSError, ZeroDivisionError) as e:
+        print("%s: unexpected %s: %s; the input files may be malformed" % (SKILL, type(e).__name__, e),
+              file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

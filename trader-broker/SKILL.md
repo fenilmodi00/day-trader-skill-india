@@ -14,10 +14,15 @@ Every order that leaves this pack passes through three gates, all enforced
 by code in `ticket.py`, not by a checklist:
 
 1. Risk. `trader-risk/check.py` must have a fresh PASS for that exact order
-   today, matched by order hash. Edit the quantity, the entry, the stop, the
-   target or the tag and the old PASS is void.
+   today, matched by order hash (the order fields plus the plan's own entry,
+   stop and target leg levels, so an edited plan voids the PASS too). Edit the
+   quantity, the entry, the stop, the target or the tag and the old PASS is
+   void. The PASS also expires: check.py stamps a `valid_until` (15 minutes,
+   never past the entry cutoff), and an expired PASS is refused and asks for
+   `check.py` again.
 2. You. `approve --yes "<your reply>"` records your explicit yes, word for
-   word, bound to the same order hash. No approval, no execute.
+   word, bound to the same order hash. No approval, no execute. A yes that
+   names another order in the batch by its symbol is refused.
 3. Host. Claude shows an Allow once / Deny card before the execute call. That
    card is the host tool approval and is never automated here.
 
@@ -39,6 +44,19 @@ stored confirmation of the typed phrase `GO LIVE WITH UPSTOX` (via
 - `flatten` prepares the opposite MARKET order with market protection set.
   It obeys the same three gates and is never bypassed on a live account.
 - `log` prints today's decisions and fills.
+
+## Files
+
+| file | what |
+| --- | --- |
+| `trader/plan.json` | the proposed order's plan (trader-budget writes it; `flatten` reuses it) |
+| `trader/state/risk.json` | trader-risk's verdicts; only an unexpired PASS from today is READY |
+| `trader/state/orders.json` | every yes, placed, failed and filled, with each entry's order hash |
+| `trader/ticket.json` | the ticket: the order, its payload, your yes, the result |
+
+Reconcile first: before every check or approve, compare the ledger with the
+read-only Upstox `get_order_book` and `get_positions`, and run `result` for
+any approval with no result yet (the order may already be at the broker).
 
 ## Payload fidelity
 

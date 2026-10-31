@@ -24,8 +24,9 @@ Stops:
   or-low     the opening-range low
   price:X    your price
   pct:X      X percent under the entry
-  atr:K      K times the 14-bar ATR under the entry, on the session's 5m bars
-             up to the entry bar (--offline FILE, Upstox 1m resampled). With
+  atr:K      K times the 14-bar average true range (simple mean, not Wilder's
+             smoothing) under the entry, on the session's 5m bars that closed
+             at or before the entry (--offline FILE, Upstox 1m resampled). With
              fewer than 14 bars by then it averages all of them and says so.
   A level setup has no opening-range default: give a stop.
 
@@ -238,7 +239,7 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
         a = as_decimal(round(atr, 6))
         raw = e - stop_param * a
         label = "%s x ATR(%d) under the entry" % (num_text(stop_param), atr_bars)
-        detail = "ATR %s over the %d bars to the entry%s" % (
+        detail = "average true range (simple mean) %s over the %d bars to the entry%s" % (
             num_text(a.quantize(Decimal("0.0001"))), atr_bars,
             " (fewer than %d so far)" % ATR_BARS if atr_bars < ATR_BARS else "")
     else:
@@ -310,8 +311,9 @@ def bars_of(rows):
 
 
 def atr_of(bars, n=ATR_BARS):
-    """Average true range of the last n bars (all of them if fewer). The first
-    bar of the session uses its own high - low (no overnight gap)."""
+    """Average true range of the last n bars (all of them if fewer): a simple
+    mean of the true ranges, not Wilder's smoothed ATR. The first bar of the
+    session uses its own high - low (no overnight gap). Returns (atr, bars used)."""
     trs, prev = [], None
     for b in bars:
         tr = b["h"] - b["l"]
@@ -326,8 +328,20 @@ def atr_of(bars, n=ATR_BARS):
 def session_bars(rows, day, bar_min=5, upto_slot=None, at=None):
     """Closed N-minute bars of one IST session, oldest first: the 1m rows go
     through the one resample in trader_core.upstox. `at` cuts the session at a
-    wall-clock time; upto_slot cuts after the entry bar."""
+    wall-clock time, capped by the data's own last bar (a late `at` cannot pull
+    bars in past the end of the recording); upto_slot cuts after the entry bar."""
     open_dt = session_dt(day, OPEN)
+    data_dt = None
+    for row in reversed(rows or []):
+        try:
+            data_dt = upstox_mod._parse_ts(row[0])
+        except Exception:
+            continue
+        if data_dt.date() == day:
+            break
+        data_dt = None
+    if at is not None and data_dt is not None and data_dt < at:
+        at = data_dt
     out = []
     for b in upstox_mod.resample(bars_of(rows), bar_min):
         if b["dt"].date() != day:
@@ -492,7 +506,16 @@ def build_plan(a, now):
                 raise PlanError("cannot read Upstox intraday bars: %s" % e)
         if not cal.is_trading_day(day) or not rows:
             raise PlanError("no bars for %s" % day.isoformat())
-        bars = session_bars(rows, day, 5, info.get("entry_bar"),
+        upto = info.get("entry_bar")
+        if upto is None and entry_time is not None:
+            # no entry bar: only the bars that closed at or before the entry time
+            # count, however late --now is.
+            since_open = (datetime.datetime.combine(day, entry_time)
+                          - datetime.datetime.combine(day, OPEN)).total_seconds()
+            upto = int(since_open) // (5 * 60) - 1
+            if upto < 0:
+                raise PlanError("the entry at %s is before the first 5m bar closes" % entry_time.strftime("%H:%M"))
+        bars = session_bars(rows, day, 5, upto,
                             parse_ist(a.now) if a.now else None)
         if len(bars) < 3:
             raise PlanError("an atr stop needs at least 3 closed 5m bars by the entry on %s; found %d"
@@ -692,6 +715,10 @@ def main(argv=None, source=None):
     except (cfgmod.ConfigError, orders_mod.PlanError, ValueError) as e:
         print("exit.py: %s" % e, file=sys.stderr)
         return 2
+    except (TypeError, KeyError, OSError, ZeroDivisionError, OverflowError) as e:
+        print("exit.py: could not finish (%s: %s); check the plan and the flags, and report it if they look "
+              "right" % (type(e).__name__, e), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

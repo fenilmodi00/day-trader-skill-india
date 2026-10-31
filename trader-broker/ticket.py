@@ -6,10 +6,14 @@ unless all three gates hold, enforced here in code:
 
   gate 1, risk    the exact order has a fresh PASS from trader-risk check.py
                   for today, matched by order hash (symbol, instrument_key,
-                  side, quantity, entry, stop, target, tag). Edit anything and
-                  the old PASS and the old approval are both void.
+                  side, quantity, entry, stop, target, tag, and the plan's
+                  own leg levels). Edit anything and the old PASS and the old
+                  approval are both void. A PASS also expires: check.py
+                  stamps a valid_until (15 minutes, never past the entry
+                  cutoff), and an expired PASS is refused here.
   gate 2, you     your typed yes, recorded word for word by approve, bound to
-                  the same order hash. No approval, no execute.
+                  the same order hash. No approval, no execute. A yes that
+                  names another order in the batch by symbol is refused.
   gate 3, host    the host tool card (Allow once / Deny) Claude shows before
                   the execute call. Documented, never automated here.
 
@@ -17,7 +21,8 @@ unless all three gates hold, enforced here in code:
             payload that will be sent. --json prints it as JSON.
   approve   record the user's explicit yes for this one order (the reply word
             for word) and write the ticket with the payload. Refuses ok, sure,
-            a batch yes, a doubtful yes, and anything without a fresh PASS.
+            a batch yes, a doubtful yes, a yes that names another order in the
+            batch, and anything without a fresh PASS.
   execute   place the approved order through the trader_core broker seam.
             Sandbox host by default; live needs the stored confirmation from
             trader_core.config.confirm_live. Records order id, status, fills
@@ -175,16 +180,26 @@ def flatten_order(plan, cfg=None, qty=None):
 
 
 def order_core(o):
-    out = {}
+    """The exact order as one core: the ticket fields, with every level (entry,
+    stop, target, price, trigger) through float(), so an edited plan level or
+    price invalidates the verdict and "1193.6" and 1193.6 agree."""
+    core = {}
     for k in TICKET_FIELDS:
         if o.get(k) is not None:
-            out[k] = o[k]
-    return out
+            core[k] = o[k]
+    for k in ("entry", "stop", "target", "price", "trigger_price"):
+        if core.get(k) is not None:
+            try:
+                core[k] = float(core[k])
+            except (TypeError, ValueError):
+                pass
+    return core
 
 
 def order_hash(o):
     """The exact order as one hash: the same number trader-risk's PASS is
-    bound to. An edited quantity or price changes it and voids everything."""
+    bound to. An edited quantity, price or plan level changes it and voids
+    everything."""
     blob = json.dumps(order_core(o), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -234,10 +249,11 @@ def amount_numbers(o):
     return nums
 
 
-def parse_yes(reply, order):
+def parse_yes(reply, order, batch_symbols=()):
     """Is this reply an explicit yes for THIS one order? Returns (ok, why).
     The user's chat reply is recorded word for word; ok, sure, a batch yes and
-    a doubtful yes all count as no."""
+    a doubtful yes all count as no, and so does a yes that names ANOTHER ORDER
+    IN THE BATCH by its symbol (a symbol not in the batch is not checked)."""
     raw = (reply or "").strip()
     if not raw:
         return False, "the reply is empty"
@@ -250,6 +266,13 @@ def parse_yes(reply, order):
         return False, "a yes covers one order at a time, never a batch"
     if DOUBT_WORDS & set(words[1:]):
         return False, "the reply has a condition or a doubt in it; ask again"
+    sym = str(order.get("symbol", "")).upper()
+    tokens = set(re.findall(r"[A-Z][A-Z.\-]{0,9}", raw.upper()))
+    others = {str(s).upper() for s in batch_symbols} - {sym}
+    named = tokens & others
+    if named:
+        return False, "a yes covers one order at a time; this reply names %s, but this order is for %s" % (
+            ", ".join(sorted(named)), sym)
     nums = [float(n.replace(",", "")) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", raw)]
     if nums:
         want = amount_numbers(order)
@@ -268,8 +291,10 @@ def load_plan(path, symbol=None):
     return plan
 
 
-def risk_record(risk, today):
-    """The verdict as the gates read it: today's only, with the plan attached."""
+def risk_record(risk, today, now=None):
+    """The verdict as the gates read it: today's only, with the plan attached,
+    and not expired. check.py stamps valid_until (aware IST); an expired PASS
+    is refused, never silently used."""
     if not isinstance(risk, dict) or risk.get("verdict") not in ("PASS", "BLOCK"):
         return None
     day = str(risk.get("now", ""))[:10] or str(risk.get("generated_at", ""))[:10]
@@ -278,6 +303,13 @@ def risk_record(risk, today):
     plan = risk.get("plan")
     if not isinstance(plan, dict) or not plan:
         return None
+    try:
+        until = parse_ist(risk.get("valid_until"))
+    except ValueError:
+        until = None
+    if until is not None and now is not None and now > until:
+        raise TicketError("the PASS expired at %s IST; run trader-risk check.py again"
+                          % until.strftime("%H:%M"))
     return {"verdict": risk["verdict"], "reasons": risk.get("reasons") or [], "plan": plan}
 
 
@@ -285,9 +317,9 @@ def order_from_plan(plan, kind):
     return flatten_order(plan) if kind == "flatten" else entry_order(plan)
 
 
-def risk_gate(o, risk, today):
+def risk_gate(o, risk, today, now=None):
     """Gate 1: a fresh trader-risk PASS for this exact order. Raises."""
-    rec = risk_record(risk, today)
+    rec = risk_record(risk, today, now=now)
     if rec is None:
         raise TicketError("gate 1 (risk): no trader-risk PASS for today (%s); run "
                           "trader-risk check.py for this exact order first" % today)
@@ -319,14 +351,21 @@ def _read_ticket(path):
     return doc if isinstance(doc, dict) else {}
 
 
-def ticket_view(o, ticket, risk, today):
+def ticket_view(o, ticket, risk, today, now=None):
     """(ready, status, risk note) for show, without raising: a BLOCK is shown,
-    not hidden."""
+    not hidden, and an expired PASS is NOT READY."""
     fp = order_hash(o)
     view_kind = o.get("kind")
-    rec = risk_record(risk, today)
+    try:
+        rec = risk_record(risk, today, now=now)
+    except TicketError as exc:
+        rec, status = None, "NOT READY: " + str(exc)
+    else:
+        status = None
     if rec is None:
-        ready, status = False, "NOT READY: no fresh trader-risk PASS for today; run check.py"
+        if status is None:
+            status = "NOT READY: no fresh trader-risk PASS for today; run check.py"
+        ready = False
     elif rec["verdict"] != "PASS":
         ready = False
         status = "BLOCKED by trader-risk: " + "; ".join(rec["reasons"][:3])
@@ -361,7 +400,7 @@ def _clock(a):
     try:
         now = parse_ist(a.now) if getattr(a, "now", None) else now_ist()
     except ValueError as e:
-        raise TicketError("--now wants an IST time like \"2026-10-26 10:00\": %s" % e)
+        raise TicketError("--now wants an IST time like \"2026-10-26 10:00\" or \"10:00\": %s" % e)
     today = getattr(a, "today", None) or now.date().isoformat()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", today):
         raise TicketError("--today wants a date like 2026-10-26")
@@ -372,12 +411,12 @@ def _clock(a):
 
 def cmd_show(a, source=None):
     cfg = config.load(a.config)
-    _, today = _clock(a)
+    now, today = _clock(a)
     plan = load_plan(a.plan, a.symbol)
     flatten_mode = bool(a.flatten) or (_read_ticket(a.ticket).get("kind") == "flatten")
     o = flatten_order(plan) if flatten_mode else entry_order(plan)
     view = ticket_view(o, _read_ticket(a.ticket), read_json(a.risk, "risk verdict",
-                                                            required=False), today)
+                                                            required=False), today, now=now)
     if a.json:
         print(json.dumps(view, indent=2))
         return 0 if view["ready"] else 1
@@ -404,7 +443,7 @@ def cmd_approve(a, source=None):
     plan = load_plan(a.plan, a.symbol)
     flatten_mode = bool(a.flatten) or (_read_ticket(a.ticket).get("kind") == "flatten")
     o = flatten_order(plan, cfg) if flatten_mode else entry_order(plan)
-    risk_gate(o, read_json(a.risk, "risk verdict", required=False), today)
+    risk_gate(o, read_json(a.risk, "risk verdict", required=False), today, now=now)
     ok, why = parse_yes(a.yes, o)
     if not ok:
         print("%s: not recorded: %s. Show the ticket and ask again." % (SKILL, why), file=sys.stderr)
@@ -439,7 +478,7 @@ def cmd_execute(a, source=None):
     if ticket.get("status") in ("placed", "filled"):
         # already placed: re-submitting returns the existing order id (duplicate)
         pass
-    risk_gate(o, read_json(a.risk, "risk verdict", required=False), today)
+    risk_gate(o, read_json(a.risk, "risk verdict", required=False), today, now=now)
     approval_gate(o, ticket, today)
     payload = payload_for(o)
     if isinstance(ticket.get("payload"), dict) and ticket["payload"] != payload:

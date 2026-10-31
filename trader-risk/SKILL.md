@@ -51,8 +51,8 @@ Exit codes: 0 PASS, 1 BLOCK (a verdict, not an error), 2 bad input. With
 | `trader/plan.json` | the sized two-leg plan (trader-budget prints it; save it here) |
 | `trader/config.json` | the limits (trader-budget ships `config.example.json`) |
 | `--instruments` file | a recorded Upstox master slice, for lot, tick and freeze |
-| `trader/state/orders.json` | what was approved or placed today: trades per day, daily loss, duplicate tags |
-| `trader/state/risk.json` | the verdict it writes, with the plan attached |
+| `trader/state/orders.json` | what was approved or placed today: trades per day, daily loss, duplicate tags, unresolved approvals |
+| `trader/state/risk.json` | the verdict it writes, with the plan attached and a `valid_until` for it |
 
 ## The IST clock
 
@@ -72,6 +72,18 @@ the calendar module decides, not a hardcoded list.
 Every check reads the plan, the config and the recorded state. The plan is
 judged as a set first: entry, stop and target legs with the right sides,
 product and quantities.
+
+**Reconcile first.** The daily limits count what was logged. The check never
+sees the broker on its own, so compare `trader/state/orders.json` with the
+read-only Upstox `get_order_book` and `get_positions` before every check: an
+approval from today with no later placed or failed record for the same order
+hash (`ticket.py result` was never run) counts as placed for the duplicate,
+trades, orders and daily-loss checks, and warns that it has no result
+recorded (the order may be sitting at the broker).
+
+**A verdict expires.** The PASS carries a `valid_until`: 15 minutes from the
+check, never past the session's entry cutoff (15:00 IST). trader-broker
+refuses an expired PASS and asks for `check.py` again.
 
 | check | blocks when |
 | --- | --- |
@@ -120,6 +132,10 @@ required well above the entry cost.
 3. If the plan changes in any way, run the check again. trader-broker
    matches the verdict to the plan, so an edited plan is not ready until it
    passes again, and a verdict from yesterday does not count today.
+4. Reconcile first: compare the recorded state with the read-only Upstox
+   `get_order_book` and `get_positions` before every check, and run
+   `ticket.py result` for any approval that has no result yet, so the
+   limits count what the broker actually holds.
 
 ## Example: the reel
 

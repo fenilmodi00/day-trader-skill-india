@@ -19,8 +19,17 @@ def to_ist(dt):
 
 
 def parse_ist(text):
-    """Parse ISO-8601 or "YYYY-MM-DD HH:MM" into an aware IST datetime."""
-    raw = text.strip()
+    """Parse ISO-8601 or "YYYY-MM-DD HH:MM" into an aware IST datetime.
+
+    A bare "HH:MM" (an optional trailing " IST", any case) is today's IST
+    date at that time; an offset or Z in the input makes it absolute.
+    """
+    raw = str(text).strip()
+    if raw.upper().endswith(" IST"):
+        raw = raw[:-4].strip()
+    t = hhmm_or_none(raw)
+    if t is not None:
+        raw = "%s %s" % (now_ist().date().isoformat(), t.strftime("%H:%M"))
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
     try:
